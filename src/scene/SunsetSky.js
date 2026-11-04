@@ -1,0 +1,100 @@
+import * as THREE from 'three';
+
+// Clouds advect and change shape at two heights; the sun and horizon stay put.
+// The existing photographic sky supplies fine cloud detail inside the shader.
+export function createSunsetSky(photo, lighting) {
+  photo.colorSpace = THREE.SRGBColorSpace;
+  photo.wrapS = THREE.RepeatWrapping;
+  const sunDirection = new THREE.Vector3(...lighting.sun.position)
+    .sub(new THREE.Vector3(...lighting.sun.target));
+  sunDirection.y *= .42;
+  sunDirection.normalize();
+  const uniforms = {
+    horizon:{value:new THREE.Color(1.28,.62,.37)},zenith:{value:new THREE.Color(.24,.38,.62)},
+    cloudShade:{value:new THREE.Color(.58,.39,.43)},cloudLight:{value:new THREE.Color(1.65,.98,.65)},dayGlow:{value:1},
+    skyMap: { value: photo },
+    cloudTime: { value: 0 },
+    sunDirection: { value: sunDirection },
+  };
+  const material = new THREE.ShaderMaterial({
+    uniforms,
+    side: THREE.BackSide,
+    depthWrite: false,
+    fog: false,
+    vertexShader: `varying vec3 skyPosition;
+      void main(){vec4 p=modelMatrix*vec4(position,1.0);skyPosition=p.xyz;
+      gl_Position=projectionMatrix*viewMatrix*p;}`,
+    fragmentShader: `uniform sampler2D skyMap;
+      uniform float cloudTime,dayGlow;uniform vec3 horizon,zenith,cloudShade,cloudLight,sunDirection;varying vec3 skyPosition;
+      float hash(vec2 p){return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453);}
+      float noise(vec2 p){vec2 i=floor(p),f=fract(p);f=f*f*(3.0-2.0*f);
+        return mix(mix(hash(i),hash(i+vec2(1.0,0.0)),f.x),
+          mix(hash(i+vec2(0.0,1.0)),hash(i+vec2(1.0,1.0)),f.x),f.y);}
+      float cloud(vec2 p){float a=.5,v=0.0;mat2 turn=mat2(.8,-.6,.6,.8);
+        for(int i=0;i<4;i++){v+=a*noise(p);p=turn*p*2.03+17.1;a*=.5;}return v;}
+      void main(){
+        vec3 d=normalize(skyPosition-cameraPosition);
+        vec2 uv=vec2(atan(d.z,d.x)*.159154943+.5,asin(clamp(d.y,-1.0,1.0))*.318309886+.5);
+        vec2 wind=vec2(cloudTime*.00013,cloudTime*.000018);
+        vec2 plane=d.xz/max(.23,d.y+.38);
+        float low=cloud(plane*1.7+vec2(cloudTime*.008,-cloudTime*.003));
+        float high=cloud(plane*3.2+vec2(-cloudTime*.004,cloudTime*.0018)+41.7);
+        vec2 warp=vec2(low-.5,high-.5)*.009;
+        // Keep longitude continuous for the sampler; RepeatWrapping performs
+        // the wrap. Correct the atan branch before selecting the mip level,
+        // otherwise one pixel sees a panorama-wide footprint and draws a seam.
+        vec2 skyUv=vec2(uv.x+wind.x+warp.x,clamp(uv.y+wind.y+warp.y,0.0,1.0));
+        vec2 gradX=dFdx(skyUv),gradY=dFdy(skyUv);
+        gradX.x-=floor(gradX.x+.5);gradY.x-=floor(gradY.x+.5);
+        vec3 photograph=texture2DGradEXT(skyMap,skyUv,gradX,gradY).rgb;
+        // The photographed panorama itself has a small edge exposure mismatch.
+        // Blend only its narrow join; the rest of the dome still uses one read.
+        float longitude=fract(skyUv.x),edgeDistance=min(longitude,1.0-longitude);
+        if(edgeDistance<.012){
+          vec3 opposite=texture2DGradEXT(skyMap,vec2(1.0-longitude,skyUv.y),vec2(-gradX.x,gradX.y),vec2(-gradY.x,gradY.y)).rgb;
+          photograph=mix(photograph,opposite,.5*(1.0-smoothstep(0.0,.012,edgeDistance)));
+        }
+        float detail=dot(photograph,vec3(.30,.52,.18));
+        // Longitude is undefined exactly at the zenith. Fade that tiny polar
+        // region to the clear sky while retaining the two continuous clouds.
+        detail=mix(detail,.12,smoothstep(.995,.9999,d.y));
+        float photographicCloud=smoothstep(.15,.62,detail);
+        float mist=smoothstep(.56,.79,low)*.27+smoothstep(.67,.85,high)*.16;
+        float cover=clamp(photographicCloud*.82+mist-.045,0.0,.94)*smoothstep(-.12,.08,d.y);
+        float height=smoothstep(-.05,.90,d.y);
+        vec3 atmosphere=mix(horizon,zenith,height);
+        float toward=max(0.0,dot(d,sunDirection));
+        float glow=pow(toward,12.0);
+        atmosphere+=cloudLight*glow*.7*dayGlow;
+        vec3 litCloud=mix(cloudShade,cloudLight,clamp(detail*.85+glow*.55,0.0,1.0));
+        litCloud+=cloudLight*.16*smoothstep(.43,.72,high)*photographicCloud;
+        vec3 color=mix(atmosphere,litCloud,cover);
+        float sun=smoothstep(.99968,.99994,toward)*(1.0-cover*.88);
+        color+=cloudLight*2.4*sun*dayGlow;
+        color=mix(horizon*.32,color,smoothstep(-.30,.10,d.y));
+        gl_FragColor=vec4(color,1.0);
+        #include <tonemapping_fragment>
+        #include <colorspace_fragment>
+      }`,
+  });
+  const mesh = new THREE.Mesh(new THREE.SphereGeometry(85,48,24), material);
+  mesh.name = 'Sunset_Cloud_Dome';
+  mesh.frustumCulled = false;
+  mesh.renderOrder = -100;
+  const state = { style:'afternoon', time:0, lowWind:0, highWind:0, reducedMotion:false };
+  return {
+    mesh,
+    state,
+    setTimeOfDay(day,direction){
+      for(const key of ['horizon','zenith','cloudShade','cloudLight'])uniforms[key].value.setRGB(...day[key]);
+      uniforms.dayGlow.value=Math.min(1,day.sun);uniforms.sunDirection.value.copy(direction);state.hour=day.hour;
+    },
+    update(delta,reducedMotion) {
+      state.reducedMotion = reducedMotion;
+      if(!reducedMotion)uniforms.cloudTime.value += delta;
+      state.time = uniforms.cloudTime.value;
+      state.lowWind = state.time*.008;
+      state.highWind = -state.time*.004;
+    },
+  };
+}

@@ -1,0 +1,24 @@
+export const PROJECT_IDS = Array.from({ length: 6 }, (_, i) => `project-0${i + 1}`);
+const idsOf = projects => projects.map(project => typeof project==='string'?project:project.id);
+export function nextWayfindingTarget(viewed,projects=PROJECT_IDS){
+ if(!viewed.has('profile'))return 'gallery';
+ if(idsOf(projects).some(id=>!viewed.has(id)))return 'atelier';
+ return viewed.has('contact')?null:'library';
+}
+export function complete(previous, id, projects=PROJECT_IDS) {
+  const ids=idsOf(projects);
+  const next = new Set(previous);
+  if (id === 'portfolio') ids.forEach(key => next.add(key));
+  else if (id === 'profile' || id === 'contact' || ids.includes(id)) next.add(id);
+  return next;
+}
+export function counts(viewed, projects=PROJECT_IDS) {
+  return { profile: Number(viewed.has('profile')), portfolio: idsOf(projects).filter(id => viewed.has(id)).length, contact: Number(viewed.has('contact')) };
+}
+export function newlyCompletedQuests(previous,next,projects=PROJECT_IDS) {
+  const before=counts(previous,projects),after=counts(next,projects);
+  return ['profile','portfolio','contact'].filter(id=>{
+    const total=id==='portfolio'?projects.length:1;
+    return total>0&&before[id]<total&&after[id]===total;
+  });
+}

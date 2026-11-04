@@ -1,0 +1,73 @@
+/* Native, reflowing readers after the shared physical prop handoff. */
+@media (width <= 768px){
+ .detail-dialog--tablet .detail-sheet{width:calc(100vw - 20px);height:min(660px,calc(100dvh - 32px));border-width:7px}
+ .detail-dialog--tablet .detail-header{padding:12px 14px;align-items:flex-start;gap:10px}
+ .detail-dialog--tablet .profile-heading{gap:8px 16px}
+ .detail-dialog--tablet .profile-header-role{font-size:16px;font-weight:400;line-height:1.5}
+ .detail-dialog--tablet .detail-body{padding:12px;gap:12px;overflow:hidden}
+ .detail-dialog--tablet .preserved-profile{display:block;flex:1;min-height:0;overflow:auto;overscroll-behavior:contain}
+ .detail-dialog--tablet .profile-section{height:auto;min-height:100%}
+ .detail-dialog--tablet .profile-section:not(.is-active){display:none}
+ .detail-dialog--tablet .mission-panel{height:auto;min-height:100%;padding:16px 12px;overflow:visible;justify-content:flex-start}
+ .detail-dialog--tablet .mission-panel__title{flex-shrink:0;margin:0 0 24px}
+ .detail-dialog--tablet .mission-panel__body{margin:0;flex:none}
+ .detail-dialog--tablet .mission-identity__body{display:flex;flex:none;align-items:flex-end;justify-content:flex-start;gap:16px;min-height:0;padding-top:6px}
+ .detail-dialog--tablet .mission-profile{display:block;flex:0 0 32%;width:32%;max-width:160px;height:auto;aspect-ratio:1110/1417;align-self:flex-end;margin:0}
+ .detail-dialog--tablet .mission-profile img{display:block;width:100%;height:auto;aspect-ratio:1110/1417;object-fit:cover}
+ .detail-dialog--tablet .mission-identity__data{display:flex;flex:1;flex-direction:column;justify-content:flex-end;align-items:flex-start;align-self:flex-end;width:auto;height:auto;min-width:0;gap:6px}
+ .detail-dialog--tablet .mission-identity__data>dl{display:block;margin:0}
+ .detail-dialog--tablet .mission-identity .status{display:block;margin:0}
+ .detail-dialog--tablet .mission-name{margin:0 0 6px;font-size:20px;line-height:1.4;overflow-wrap:anywhere}
+ .detail-dialog--tablet .mission-name span{white-space:normal;font-size:16px}
+ .detail-dialog--tablet .mission-operational-data{display:flex;flex-direction:column;gap:8px;margin:0;width:100%}
+ .detail-dialog--tablet .mission-operational-data>div{display:block;min-width:0}
+ .detail-dialog--tablet .mission-operational-data dt{margin:0;font-size:16px;line-height:1.4}
+ .detail-dialog--tablet .mission-operational-data dd{margin:0;font-size:16px;line-height:1.5;overflow-wrap:anywhere}
+ .detail-dialog--tablet .mission-modules__columns{flex:none;grid-template-columns:repeat(2,minmax(0,1fr));align-content:start;gap:20px 12px}
+ .detail-dialog--tablet .mission-panel .skill-card{flex-direction:row;gap:8px}
+ .detail-dialog--tablet :is(.mission-log ol,.mission-achievement__body ul){grid-template-columns:max-content minmax(0,1fr);gap:16px 14px}
+ .detail-dialog--tablet .mission-log ol{grid-template-columns:minmax(0,.9fr) minmax(0,1.1fr)}
+ .detail-dialog--tablet .mission-panel li{overflow-wrap:anywhere}
+ .detail-dialog--tablet :is(.mission-log time,.mission-achievement__body time){white-space:normal}
+ .detail-dialog--tablet .mission-cert-list{display:grid;gap:14px}
+ .detail-dialog--tablet .mission-cert-list li+li{margin-top:0}
+ .detail-dialog--tablet .profile-tabs{display:flex;justify-content:space-around;gap:clamp(2px,1vw,6px);height:66px;padding-bottom:24px;flex-shrink:0}
+ .detail-dialog--tablet .profile-tabs button{width:min(38px,11vw);height:min(38px,11vw)}
+
+ .detail-dialog--card[open]{padding:16px;align-items:center;overflow:hidden}
+ .detail-dialog--card .detail-sheet{width:calc(100vw - 32px);max-width:680px;height:min(660px,calc(100dvh - 48px));min-height:0;aspect-ratio:auto;display:flex;flex-direction:column}
+ .detail-dialog--card .detail-display{flex:1;min-height:0;width:100%}
+ .detail-dialog--card .detail-header{padding:18px 20px 14px 44px;gap:12px}
+ .detail-dialog--card .detail-body{padding:12px 20px 24px;overflow:auto;overscroll-behavior:contain}
+ .detail-dialog--card :is(.preserved-contact,.footer-contact__panel){height:auto;min-height:100%}
+ .detail-dialog--card .footer-contact__details{display:flex;flex-direction:column;min-height:100%;gap:24px}
+ .detail-dialog--card .contact-addresses{flex:1;justify-content:flex-start;gap:26px;padding:10px 0}
+ .detail-dialog--card .footer-contact__item{display:flex;align-items:center;gap:13px}
+ .detail-dialog--card .footer-contact__text{min-width:0}
+ .detail-dialog--card .footer-contact__value{white-space:normal;overflow-wrap:anywhere;word-break:normal}
+ .detail-dialog--card .footer-contact__legal{margin:0;white-space:normal;overflow-wrap:anywhere;flex-shrink:0}
+ .detail-dialog--card .footer-contact__legal::before{left:-20px;right:-20px}
+
+ .detail-dialog--artwork .detail-sheet{aspect-ratio:auto;container-type:normal;--exhibit-rim:5px!important;--exhibit-radius:8px!important}
+ .detail-dialog--artwork .detail-header{padding:14px 14px 12px;gap:10px;align-items:center;flex-wrap:wrap}
+ .detail-dialog--artwork .detail-header>div:first-child{flex-basis:calc(100% - 48px);order:0}
+ .detail-dialog--artwork .close-button{order:1;margin-left:auto}
+ .detail-dialog--artwork .project-switcher{order:2;gap:10px;margin-left:auto}
+ .detail-dialog--artwork :is(.project-switcher button,.close-button){width:36px;height:36px;flex-shrink:0}
+ .detail-dialog--artwork .project-switcher span{font-size:14px}
+ .detail-dialog--artwork .exhibit-category{font-size:18px;line-height:1.4;overflow-wrap:anywhere}
+ .detail-dialog--artwork .exhibit-category span{display:none}
+ .detail-dialog--artwork .detail-body{display:block;padding:8px 18px 28px;overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin}
+ .detail-dialog--artwork .exhibit{display:flex;flex-direction:column;gap:28px;flex:none;min-height:0;overflow:visible}
+ .detail-dialog--artwork .exhibit-artwork{display:flex;flex:none;width:100%;height:auto;min-height:0;padding:12px 0 4px}
+ .detail-dialog--artwork .exhibit-artwork img{width:100%;height:auto;max-height:360px;object-fit:contain}
+ .detail-dialog--artwork .exhibit-caption{display:flex;flex:none;justify-content:flex-start;align-items:flex-start;gap:18px;width:100%;padding:0;overflow:visible;border:0}
+ .detail-dialog--artwork .exhibit-logo{max-width:75%;max-height:64px;margin:0 0 6px}
+ .detail-dialog--artwork .exhibit-logo--dive{width:190px;height:64px}
+ .detail-dialog--artwork .exhibit-tagline{font-size:22px;line-height:1.5;word-break:normal;overflow-wrap:anywhere}
+ .detail-dialog--artwork .exhibit-description{font-size:16px;line-height:1.8;word-break:normal;overflow-wrap:anywhere}
+ .detail-dialog--artwork .exhibit-metadata{display:grid;align-self:stretch;gap:14px;margin:4px 0 0;padding:22px 0;font-size:16px}
+ .detail-dialog--artwork .exhibit-metadata>div{grid-template-columns:94px minmax(0,1fr);gap:10px}
+ .detail-dialog--artwork .exhibit-links{display:flex;flex-wrap:wrap;gap:16px 28px}
+ .detail-dialog--artwork .exhibit-links a{font-size:20px;min-height:44px}
+}

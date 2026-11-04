@@ -1,0 +1,10 @@
+.world-cursor-ring{position:fixed;left:0;top:0;width:48px;height:48px;margin:0;padding:0;border:0;background:none;z-index:2147483647;pointer-events:none;contain:layout style;will-change:transform;mix-blend-mode:normal}
+.world-cursor-ring[hidden]{display:none}
+.world-cursor-ring svg{display:block;width:48px;height:48px;overflow:visible;pointer-events:none}
+.world-cursor-ring{color:#fff}.world-cursor-ring[data-ink="black"]{color:#000}
+@media(any-hover:hover) and (any-pointer:fine){
+ html,body,#root,#root *{cursor:url('./cursors/ring.svg') 24 24,auto}
+ html[data-world-cursor],html[data-world-cursor] *,html[data-world-cursor] dialog::backdrop{cursor:none!important}
+ html[data-world-cursor][data-cursor-native]:not([data-cursor-looking]),html[data-world-cursor][data-cursor-native]:not([data-cursor-looking]) *,html[data-world-cursor][data-cursor-native]:not([data-cursor-looking]) dialog::backdrop{cursor:var(--world-native-cursor,url('./cursors/ring.svg') 24 24,auto)!important}
+}
+@media(forced-colors:active){.world-cursor-ring{mix-blend-mode:normal}.world-cursor-ring svg circle:last-child{fill:Highlight}}

@@ -1,0 +1,20 @@
+Ending display fonts
+
+Nanum Myeongjo ExtraBold (800) — Google Fonts / Naver, SIL OFL 1.1.
+Cormorant Garamond Medium Italic (500) — The Cormorant Project Authors,
+SIL OFL 1.1. This is a freely redistributable alternative to the reference
+site's FancyCutPro; the proprietary Cartier font was not copied.
+
+Sources:
+https://github.com/google/fonts/tree/main/ofl/nanummyeongjo
+https://github.com/google/fonts/tree/main/ofl/cormorantgaramond
+
+These unmodified Google Fonts text-subset responses contain the exact current
+contact.statement / contact.statementEnglish, Clear and 다시 시작하기 glyphs.
+Regenerate the Google Fonts text subset if the ending copy changes. Font
+outlines remain vectors at their original precision. Licenses are adjacent.
+
+Clear uses the original Allura Regular handwriting face separately from the
+Cartier-inspired farewell faces. Allura-Regular.ttf is the unmodified original
+from https://github.com/google/fonts/tree/main/ofl/allura . Its original SIL OFL
+notice and copyright are in OFL-Allura.txt.

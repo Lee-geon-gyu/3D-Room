@@ -1,0 +1,36 @@
+{
+  "exposure": 0.86,
+  "sky": 0.64,
+  "environment": 0.3,
+  "bakeEnvironment": 0.23,
+  "studioFixtureGain": 0.82,
+  "sun": {
+    "intensity": 0.34,
+    "color": [
+      1,
+      0.83,
+      0.68
+    ],
+    "position": [
+      9,
+      10.8,
+      7
+    ],
+    "target": [
+      -2,
+      0,
+      -3
+    ]
+  },
+  "passage": 0.2,
+  "hemisphere": 0.42,
+  "projector": 45,
+  "timberBounce": 2.25,
+  "libraryGlow": 3.2,
+  "grade": [
+    1,
+    0.995,
+    0.99
+  ],
+  "exteriorSconceGain": 4.5
+}

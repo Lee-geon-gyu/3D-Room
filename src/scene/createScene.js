@@ -1,0 +1,732 @@
+import {lounge,subtractRect,sunkenSofa} from '../navigation/loungeLayout.js';
+import {createSeaView} from './SeaView.js';
+import {createWoolTexture,configureWool} from './wool.js';
+import {configureThinGlass} from './thinGlass.js';
+import {createLinearWallGlow} from './LinearWallLights.js';
+import {createAfternoonLight} from './afternoonLight.js';
+import { createSunsetSky } from './SunsetSky.js';
+import {createDeskObjects,deskFaces} from './DeskObjects.js';
+import {createContentInteraction} from './ContentInteraction.js';
+import {exhibitionPages,visibleTargets} from './interactionModel.js';
+import {createExhibitBody,createExhibitPrint} from './ExhibitFrame.js';
+import {cueOpacity,applyCuePulse} from './cuePulse.js';
+import {createMovementAudio} from '../audio/MovementAudio.js';
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
+import { Water } from 'three/addons/objects/Water.js';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { SMAAPass } from 'three/addons/postprocessing/SMAAPass.js';
+import { RectAreaLightUniformsLib } from 'three/addons/lights/RectAreaLightUniformsLib.js';
+import {createPerformanceMeter,renderScale} from './performance.js';
+import {prepareSceneGpu,yieldScenePreparation} from './prepareSceneGpu.js';
+import {createWayfinding} from './Wayfinding.js';
+import {prepareEntryArchitecture,createEntryDoor,clearEntryFoliage,isEntryFixture,finishEntryStone} from './EntryDoor.js';
+import {nextWayfindingTarget} from '../state/session.js';
+import {guideRoute,WORK_GUIDANCE} from '../navigation/layout.js';
+import runtimeAssets from './runtime-assets.json' with {type:'json'};
+import { WalkController } from '../navigation/WalkController.js';
+import { MeshBVH, acceleratedRaycast } from 'three-mesh-bvh';
+import {mergeGeometries} from 'three/addons/utils/BufferGeometryUtils.js';
+import { applyAgedFinish,createFinishNoise } from './agedMaterials.js';
+import lighting from './lighting-layout.json' with { type: 'json' };
+import { worldPoint } from '../navigation/coordinates.js';
+import decor from './wall-decor.json' with { type: 'json' };
+import gardenLayout from './garden-layout.json' with { type: 'json' };
+import {addBranchLeaves,removeTreeWood} from './treeFoliage.js';
+import {bench} from '../navigation/bench.js';
+import {sofa} from '../navigation/sofa.js';
+import {fillFacadeLight} from './facadeFinish.js';
+import {createStudioSconce} from './StudioSconce.js';
+import {createFloweringCornices} from './FloweringCornices.js';
+import {softenLibraryLighting} from './libraryLighting.js';
+import {stabilizeAtelierCeiling} from './ceilingLighting.js';
+import {prepareRoomArchitecture,createRoomDetails} from './RoomRefinements.js';
+import {inLibraryInterior,libraryLightPlan} from './libraryOccupancy.js';
+import { space, facadeColumns, OUTDOOR, GALLERY, ATELIER, LIBRARY, exteriorZ, stairPoint, flightPoint, inPolygon, routeBetween, prepareNavigationRoutes, canStand, RADIUS, eastBoundary } from '../navigation/layout.js';
+
+const base = import.meta.env.BASE_URL;
+export const asset = path => `${base}${path}`;
+function filterFoliageLight(shader){
+  const lights=THREE.ShaderChunk.lights_fragment_begin
+    .replace('spotLightCoord.xy );','fract(spotLightCoord.xy * 4.0) );')
+    .replace('RE_Direct_RectArea( rectAreaLight,','if (dot(rectAreaLight.color,vec3(1.0))>0.001) RE_Direct_RectArea( rectAreaLight,');
+  shader.fragmentShader=shader.fragmentShader.replace('#include <lights_fragment_begin>',lights);
+}
+const loadImage = url => new Promise((resolve,reject)=>{const img=new Image();img.onload=()=>resolve(img);img.onerror=()=>reject(new Error(`이미지를 읽지 못했어요: ${url}`));img.src=url;});
+export async function createScene(canvas,content,callbacks,signal){
+  const started=performance.now();let assetMs=0,compileMs=0,quality=1,lastQualityChange=0;
+  const movementAudio=createMovementAudio(signal);
+  const finishNoise=createFinishNoise();
+  const runtimeTexture=name=>asset(runtimeAssets.textures[name]??`assets/${name}`);
+  const previewImage=path=>asset(runtimeAssets.previews[path]??path);
+  callbacks.onHover('');callbacks.onNearby?.('');callbacks.onPresentation?.('');callbacks.onWater?.(false);callbacks.onUnderwater?.(false);callbacks.onSeated?.(false);callbacks.onCrouch?.(false);
+  const renderer=new THREE.WebGLRenderer({canvas,antialias:false,powerPreference:'high-performance',alpha:false});
+  const meter=createPerformanceMeter(renderer,canvas);
+  if(import.meta.env.DEV){const gl=renderer.getContext(),extension=gl.getExtension('WEBGL_debug_renderer_info');canvas.dataset.gpu=extension?gl.getParameter(extension.UNMASKED_RENDERER_WEBGL):'unknown';}
+  renderer.setPixelRatio(1);
+  renderer.outputColorSpace=THREE.SRGBColorSpace;renderer.toneMapping=THREE.ACESFilmicToneMapping;renderer.toneMappingExposure=lighting.exposure;
+  renderer.shadowMap.enabled=true;renderer.shadowMap.type=THREE.PCFShadowMap;
+    const scene=new THREE.Scene();scene.fog=new THREE.FogExp2(0xd7b8aa,.006);
+  const camera=new THREE.PerspectiveCamera(57,1,.06,130);
+    const clock=new THREE.Timer();clock.connect(document);const cues=new Map(), interactables=[],occluders=[],emissiveLamps=[],closureMeshes=[];
+  let disposed=false,cleaned=false,compiling=false,renderReady=false,raf=0,viewed=new Set(),hoverLast='',lastPointer=null,lastDiagnostic=0,lastPick=0,wasInWater=false,wasUnderwater=false,wayfindingEnabled=true,endingActive=false;
+  const manager=new THREE.LoadingManager();let count=0,total=0;
+  manager.onProgress=(_url,loaded,all)=>{count=loaded;total=all;callbacks.onProgress({loaded:count,total,phase:'재료와 작업물을 불러오고 있어요'});};
+  const textures=new THREE.TextureLoader(manager),gltf=new GLTFLoader(manager),draco=new DRACOLoader(manager);
+  draco.setDecoderPath(asset('assets/draco/'));gltf.setDRACOLoader(draco);
+  const maximumAnisotropy=renderer.capabilities.getMaxAnisotropy();
+  const resources={renderer,scene,draco};
+  const release=()=>{
+    if(cleaned)return;cleaned=true;
+    resources.composer?.passes.forEach(pass=>pass.dispose?.());resources.composer?.dispose();resources.pmrem?.dispose();resources.environmentTarget?.dispose();draco.dispose();clock.disconnect();
+    const geometries=new Set(),materials=new Set(),maps=new Set();scene.traverse(obj=>{if(obj.geometry)geometries.add(obj.geometry);if(obj.isLight&&obj.map)maps.add(obj.map);if(obj.material)(Array.isArray(obj.material)?obj.material:[obj.material]).forEach(m=>materials.add(m));});
+    materials.forEach(m=>{for(const key of Object.keys(m))if(m[key]?.isTexture)maps.add(m[key]);for(const uniform of Object.values(m.uniforms||{}))if(uniform.value?.isTexture)maps.add(uniform.value);m.dispose();});geometries.forEach(g=>g.dispose());maps.forEach(t=>t.dispose());
+    scene.background?.dispose();scene.environment?.dispose();finishNoise.dispose();meter.dispose();renderer.dispose();
+  };
+  const dispose=()=>{if(disposed)return;disposed=true;movementAudio.dispose();cancelAnimationFrame(raf);resources.controller?.dispose();resources.observer?.disconnect();if(!compiling)release();};
+  signal.addEventListener('abort',dispose,{once:true});
+  canvas.addEventListener('webglcontextlost',event=>{event.preventDefault();callbacks.onError('그래픽 연결이 잠시 끊겼어요. 공간을 다시 불러오거나 바로 메뉴에서 내용을 확인하세요.');dispose();},{signal});
+  let architecture,plantA,plantB,tree,sky,rug,waterNormal,projectImages,indirect,book,marble,vines,deskTextures,foliageLight,poolCaustics;
+  try {
+    [architecture,plantA,plantB,tree,sky,rug,waterNormal,projectImages,indirect,book,marble,vines,deskTextures,foliageLight,poolCaustics]=await Promise.all([
+      gltf.loadAsync(asset('assets/runtime/atelier.glb')),
+      gltf.loadAsync(asset('assets/potted-02.glb')),
+      gltf.loadAsync(asset('assets/models/potted_plant_04/potted_plant_04.gltf')),
+      gltf.loadAsync(asset('assets/runtime/tree.glb')),
+      textures.loadAsync(runtimeTexture('afternoon-sky.png')),
+      textures.loadAsync(runtimeTexture('jute-rug.png')),
+      textures.loadAsync(asset('assets/waternormals.jpg')),
+      // Original PNG alpha keeps the white gallery mat visible around the mockup.
+      Promise.all(content.projects.map(p=>Promise.all([loadImage(asset(p.representativeImage)),loadImage(asset(p.logo))]))),
+      textures.loadAsync(asset('assets/atelier-indirect.png')),
+      textures.loadAsync(runtimeTexture('book-spines.png')),
+      textures.loadAsync(runtimeTexture('ivory-marble.png')),
+      gltf.loadAsync(asset('assets/runtime/garden.glb')),
+      Promise.all([textures.loadAsync(asset(deskFaces.profile)),textures.loadAsync(asset(deskFaces.contact)),textures.loadAsync(asset(deskFaces.coverTitle)),textures.loadAsync(asset(deskFaces.tabletIdle))]),
+      textures.loadAsync(runtimeTexture('foliage-light-mask.png')),
+      textures.loadAsync(runtimeTexture('pool-caustics.png')),
+    ]);
+    await document.fonts.ready;
+    assetMs=performance.now()-started;
+    if(disposed){[architecture,plantA,plantB,tree,vines].forEach(g=>g.scene.traverse(o=>{o.geometry?.dispose();o.material?.dispose?.();}));return null;}
+    callbacks.onProgress({stage:'assets',phase:'오후의 빛과 반사를 준비하고 있어요'});
+    await yieldScenePreparation(signal);
+    const daylight=createAfternoonLight(),skyDirection=new THREE.Vector3(daylight.sunX,daylight.sunY*.42,daylight.sunZ).normalize(),dayFog=new THREE.Color();
+    const sunsetSky=createSunsetSky(sky,lighting);sunsetSky.setTimeOfDay(daylight,skyDirection);scene.background=null;scene.add(sunsetSky.mesh);
+    const seaView=createSeaView();scene.add(seaView.group);const woolTexture=createWoolTexture();
+    const pmrem=new THREE.PMREMGenerator(renderer);resources.pmrem=pmrem;
+    const skyEnvironment=new THREE.Scene();skyEnvironment.add(sunsetSky.mesh.clone());
+    resources.environmentTarget=pmrem.fromScene(skyEnvironment,.025,.1,120);scene.environment=resources.environmentTarget.texture;scene.environmentIntensity=lighting.environment;
+    await yieldScenePreparation(signal);
+    rug.colorSpace=THREE.SRGBColorSpace;rug.wrapS=rug.wrapT=THREE.RepeatWrapping;rug.repeat.set(2.5,2.5);rug.anisotropy=maximumAnisotropy;
+    indirect.colorSpace=THREE.NoColorSpace;indirect.flipY=false;indirect.channel=1;indirect.anisotropy=maximumAnisotropy;
+    book.colorSpace=THREE.SRGBColorSpace;book.wrapS=book.wrapT=THREE.RepeatWrapping;book.repeat.set(1.3,4.8);book.anisotropy=maximumAnisotropy;
+    marble.colorSpace=THREE.SRGBColorSpace;marble.wrapS=marble.wrapT=THREE.RepeatWrapping;marble.anisotropy=maximumAnisotropy;marble.flipY=false;
+    const daylightFill={value:1},bakedMaterials=new Map();
+    const roomChanges=prepareRoomArchitecture(architecture.scene);
+    const entryChanges=prepareEntryArchitecture(architecture.scene);
+    const facadeFinish={meshes:0,triangles:0};
+    await yieldScenePreparation(signal);
+    const facadeSlats={userData:{slats:0}};
+    await yieldScenePreparation(signal);
+    canvas.dataset.facadeFinish=JSON.stringify({...facadeFinish,slats:facadeSlats.userData.slats,fill:[.78,.65,.49]});
+    architecture.scene.traverse(obj=>{
+      if(!obj.isMesh)return;
+      obj.castShadow=true;obj.receiveShadow=true;occluders.push(obj);
+      const mats=Array.isArray(obj.material)?obj.material:[obj.material];mats.forEach(mat=>{
+        if(mat.name==='Lamp_Diffuser'||mat.name==='Exterior_Sconce_Opal')emissiveLamps.push(obj);
+        for(const key of ['map','normalMap','roughnessMap'])if(mat[key]){mat[key].wrapS=mat[key].wrapT=THREE.RepeatWrapping;mat[key].anisotropy=maximumAnisotropy;}
+        if(mat.name==='Jute'){mat.map=rug;mat.color.set(0xb09b77);}
+        if(mat.name.startsWith('Book_')){mat.map=book.clone();mat.map.offset.x=Number(mat.name.slice(5))*.157;mat.roughness=.94;}
+        if(mat.name==='Warm_Oak'||mat.name==='Exterior_Warm_Oak'){mat.color.set(0xfff0d5);mat.normalScale.set(.22,.22);mat.roughnessMap=null;mat.roughness=.52;}
+        if(mat.userData.facadeRecess)mat.color.multiplyScalar(.48);
+        if(mat.name==='Pool_Stone'){mat.color.set(0x78c4bd);mat.normalScale.set(.12,.12);mat.roughnessMap=null;mat.roughness=.38;}
+        if(mat.name==='Oak_Shaded_Edges')mat.color.set(0xae8250);
+        if(mat.name==='Ceiling_Opal'){mat.emissive.setRGB(1,.88,.70);mat.emissiveIntensity=2.0;}
+        if(mat.name==='Ground_Ceiling_Opal'){mat.emissive.setRGB(1,.88,.70);mat.emissiveIntensity=1.55;}
+        if(mat.name==='Studio_Ceiling_Opal'){mat.emissive.setRGB(1,.88,.70);mat.emissiveIntensity=1.55*lighting.studioFixtureGain;}
+        if(mat.name==='Exterior_Gloss_Black'){mat.color.set(0x191c22);mat.metalness=.65;mat.roughness=.18;if(mat.isMeshPhysicalMaterial){mat.clearcoat=.5;mat.clearcoatRoughness=.12;}}
+        if(mat.name==='White_Satin_Ceiling'){mat.color.set(0xffffff);mat.roughness=.78;}
+        if(mat.name==='Ivory_Polished_Column'){mat.map=marble;mat.color.set(0xf7f5ee);mat.normalScale.set(.04,.04);mat.roughnessMap=null;mat.roughness=.24;mat.envMapIntensity=.60;}
+        if(mat.name==='Shelf_Amber_Diffuser'){mat.emissive.setRGB(1,.65,.24);mat.emissiveIntensity=1.35;}
+        if(mat.name==='Warm_Pale_Limestone'){mat.map=marble;mat.color.set(0xfff6e6);mat.roughnessMap=null;mat.normalScale.set(.025,.025);mat.roughness=.085;if(mat.isMeshPhysicalMaterial){mat.clearcoat=.65;mat.clearcoatRoughness=.08;}mat.envMapIntensity=.85;}
+        if(mat.name==='Pale_Marble_Planter'){mat.map=marble;mat.color.set(0xffffff);mat.roughnessMap=null;mat.normalScale.set(.12,.12);mat.roughness=.48;}
+        if(mat.name==='Ivory_Mineral_Plaster'){mat.map=marble;mat.color.set(0xffedcf);mat.normalScale.set(.08,.08);mat.roughnessMap=null;mat.roughness=.62;}
+        if(mat.name==='Entry_Travertine_Wall'){mat.map=marble;mat.color.set(0xffedcf);mat.normalScale.set(.08,.08);mat.roughnessMap=null;mat.roughness=.62;}
+        if(mat.name==='Facade_Honed_Travertine'){mat.map=marble;mat.color.set(0xf2e5d1);mat.normalScale.set(.09,.09);mat.roughnessMap=null;mat.roughness=.59;}
+        if(mat.name==='Railing_Black_Metal'){mat.color.set(0x12171d);mat.metalness=.88;mat.roughness=.23;mat.envMapIntensity=.8;}
+        if(mat.name==='Pool_Brushed_Silver'){mat.color.set(0xd5d9df);mat.metalness=.78;mat.roughness=.26;}
+        if(mat.name==='Bronze'){mat.color.set(0x382613);mat.metalness=.8;mat.roughness=.48;}
+        configureWool(mat,woolTexture);
+        if(mat.name==='Natural_Linen')mat.side=THREE.DoubleSide;
+        if(mat.name==='Charcoal')mat.color.set(0x10110e);
+        if(mat.name==='Furniture_Ivory_Porcelain'){mat.map=marble;mat.color.set(0xfcfcfa);mat.roughness=.19;if(mat.isMeshPhysicalMaterial){mat.clearcoat=.45;mat.clearcoatRoughness=.15;}}
+        if(mat.name==='Furniture_White_Lacquer')mat.color.set(0xf0f1ef);
+        if(mat.name==='Furniture_White_Leather'){mat.color.set(0xf6f3ed);mat.roughness=.40;if(mat.isMeshPhysicalMaterial){mat.sheen=.22;mat.sheenRoughness=.65;mat.sheenColor.set(0xf9f6ef);}}
+        if(mat.name==='Furniture_Graphite_Steel'){mat.color.set(0x242a2e);mat.metalness=.82;mat.roughness=.30;}
+        // Baked irradiance already supplies occlusion. Drop duplicate ORM
+        // samplers so textured light/shadow passes fit 16-unit WebGL hardware.
+        mat.aoMap=null;mat.metalnessMap=null;
+        if(mat.name!=='Warm_Pale_Limestone')mat.envMapIntensity=.25;mat.lightMap=indirect;mat.lightMapIntensity=mat.name==='Warm_Pale_Limestone'?.5:mat.name==='Ivory_Mineral_Plaster'?.95:1.35;
+        if(mat.name.startsWith('Furniture_'))mat.envMapIntensity=.75;
+        if(mat.name==='Ivory_Polished_Column')mat.envMapIntensity=.60;
+        if(mat.name==='Exterior_Gloss_Black')mat.envMapIntensity=1.15;
+        if(mat.name==='Pool_Brushed_Silver')mat.envMapIntensity=1.2;
+        if(import.meta.env.DEV&&mat.name==='Exterior_Gloss_Black')canvas.dataset.exteriorTrim=JSON.stringify({color:mat.color.getHexString(),metalness:mat.metalness,roughness:mat.roughness,environment:mat.envMapIntensity,clearcoat:mat.clearcoat??0});
+        if(import.meta.env.DEV&&mat.name==='Ground_Ceiling_Opal')canvas.dataset.groundCeilingEmission=String(mat.emissiveIntensity);
+        if(import.meta.env.DEV&&mat.name==='Warm_Pale_Limestone')canvas.dataset.lighting=JSON.stringify({uvs:Object.keys(obj.geometry.attributes),channel:indirect.channel,image:[indirect.image.width,indirect.image.height],intensity:mat.lightMapIntensity});
+        // Cycles DIFFUSE without the color pass stores reflected radiance. Apply
+        // the surface albedo once, without a second Lambert conversion; retain
+        // live PBR specular so reflections still follow the visitor's position.
+        const courtyardStone=['Ivory_Mineral_Plaster','Entry_Travertine_Wall'].includes(mat.name);
+        const finish=(mat.name==='Warm_Oak'||mat.name==='Exterior_Warm_Oak')?'oak':['Warm_Pale_Limestone','Entry_Travertine_Wall','Facade_Honed_Travertine','Ivory_Mineral_Plaster'].includes(mat.name)?'stone':null;
+        mat.onBeforeCompile=shader=>{shader.uniforms.daylightFill=daylightFill;shader.fragmentShader=shader.fragmentShader.replace('#include <common>','#include <common>\nuniform float daylightFill;');filterFoliageLight(shader);if(finish)applyAgedFinish(shader,finish,finishNoise);if(mat.name==='Warm_Pale_Limestone')shader.fragmentShader=shader.fragmentShader.replace('#include <map_fragment>','#include <map_fragment>\ndiffuseColor.rgb = pow(diffuseColor.rgb,vec3(1.08));');shader.fragmentShader=shader.fragmentShader.replace('#include <lights_fragment_end>','#include <lights_fragment_end>\nreflectedLight.indirectDiffuse += material.diffuseContribution * texture2D(lightMap,vLightMapUv).rgb * lightMapIntensity * (1.0 - RECIPROCAL_PI);');if(finish==='plaster')shader.fragmentShader=shader.fragmentShader.replace('#include <lights_fragment_end>','#include <lights_fragment_end>\nreflectedLight.indirectDiffuse = max(reflectedLight.indirectDiffuse, material.diffuseContribution * vec3(0.26,0.25,0.24) * daylightFill);');};
+        if(courtyardStone){const shade=mat.onBeforeCompile;mat.onBeforeCompile=shader=>{shade(shader);finishEntryStone(shader);shader.fragmentShader=shader.fragmentShader.replace('#include <lights_fragment_end>','#include <lights_fragment_end>\nreflectedLight.indirectDiffuse=max(reflectedLight.indirectDiffuse,material.diffuseContribution*vec3(.34,.32,.29)*daylightFill);');};}
+        if(mat.userData.facadeBand&&mat.name!=='Exterior_Gloss_Black'){const shade=mat.onBeforeCompile;mat.onBeforeCompile=shader=>{shade(shader);fillFacadeLight(shader);};}
+        if(!bakedMaterials.has(mat))bakedMaterials.set(mat,mat.lightMapIntensity);
+        const beforeLibrary=mat.onBeforeCompile;mat.onBeforeCompile=shader=>{beforeLibrary(shader);if(mat.name==='White_Satin_Ceiling')stabilizeAtelierCeiling(shader,space);if(!mat.userData.facadeBand&&mat.name!=='Ceiling_Opal')softenLibraryLighting(shader,space.upperFloor*space.worldScale[1],mat.name==='White_Satin_Ceiling');};
+        mat.customProgramCacheKey=()=>`library-ceiling-match-v3-atelier-indirect-aged-${finish||'plain'}-v5${mat.userData.facadeBand?'-facade-fill-v1':''}${mat.name==='White_Satin_Ceiling'?'-stable-atelier-ceiling-v3':''}${mat.name==='Ceiling_Opal'?'-unmasked-opal-v1':''}`;
+        if(courtyardStone){const key=mat.customProgramCacheKey;mat.customProgramCacheKey=()=>`${key()}-courtyard-travertine-v2`;}
+        if(mat.name==='Railing_Clear_Glass'){configureThinGlass(mat);obj.castShadow=false;bakedMaterials.delete(mat);}
+      });
+    });scene.add(architecture.scene);
+    const roomDetails=createRoomDetails(architecture.scene);architecture.scene.add(roomDetails);roomDetails.traverse(mesh=>{if(mesh.isMesh)occluders.push(mesh);});canvas.dataset.roomRefinements=JSON.stringify(roomChanges);
+    const entry=createEntryDoor(architecture.scene);architecture.scene.add(entry);entry.traverse(mesh=>{if(mesh.isMesh)occluders.push(mesh);});
+    architecture.scene.add(createLinearWallGlow());
+    canvas.dataset.entryDoor=JSON.stringify(entryChanges);
+    const studioSconce=createStudioSconce(architecture.scene,lighting.studioFixtureGain);architecture.scene.add(studioSconce.group);
+    canvas.dataset.studioSconce=JSON.stringify({position:studioSconce.group.position.toArray(),wallX:studioSconce.group.userData.wallX});
+    await yieldScenePreparation(signal);
+    // A solid mortar bed under the individually bevelled tiles. The pool cutout
+    // stays open; small grout lines reveal mortar rather than the sky sphere.
+    const mortar=new THREE.MeshStandardMaterial({color:0x5d5143,roughness:.95});
+    const [poolLeft,poolRight,poolBack,poolFront]=space.pool,courtyardDepth=space.courtyard[3];
+    const mortarParts=[];
+    for(const rect of [[-5.4,poolLeft,-7,courtyardDepth],[poolRight,space.courtyard[1],-7,courtyardDepth],[poolLeft,poolRight,-7,poolBack],[poolLeft,poolRight,poolFront,courtyardDepth]])for(const [a,b,c,d]of subtractRect(rect,lounge.pit.bounds)){
+      const g=new THREE.PlaneGeometry(b-a,d-c);g.rotateX(-Math.PI/2);g.translate((a+b)/2,-.045,(c+d)/2);mortarParts.push(g);
+    }
+    const mortarBed=new THREE.Mesh(mergeGeometries(mortarParts),mortar);mortarParts.forEach(g=>g.dispose());mortarBed.receiveShadow=true;scene.add(mortarBed);occluders.push(mortarBed);closureMeshes.push(mortarBed);
+    const sun=new THREE.DirectionalLight(0xffffff,lighting.sun.intensity);sun.color.setRGB(...lighting.sun.color);sun.position.fromArray(lighting.sun.position);sun.target.position.fromArray(lighting.sun.target);scene.add(sun,sun.target);
+    sun.castShadow=true;sun.shadow.mapSize.set(2048,2048);Object.assign(sun.shadow.camera,{left:-15,right:15,top:18,bottom:-16,near:1,far:65});sun.shadow.bias=-.00015;sun.shadow.normalBias=.025;sun.shadow.radius=2;
+    sun.shadow.camera.updateProjectionMatrix();
+    const passageDaylight=new THREE.DirectionalLight(0xffd6a0,lighting.passage);passageDaylight.position.set(2,3,4);passageDaylight.target.position.set(-1,0,-4);scene.add(passageDaylight,passageDaylight.target);passageDaylight.castShadow=true;passageDaylight.shadow.mapSize.set(1024,1024);Object.assign(passageDaylight.shadow.camera,{left:-7,right:7,top:9,bottom:-9,near:1,far:26});passageDaylight.shadow.bias=-.00015;passageDaylight.shadow.normalBias=.012;
+    passageDaylight.shadow.camera.updateProjectionMatrix();
+    const hemisphere=new THREE.HemisphereLight(0xffe6cf,0x947a65,lighting.hemisphere);scene.add(hemisphere);
+    RectAreaLightUniformsLib.init();const courtyardFill=new THREE.RectAreaLight(0xffe1be,2.0,10,5);courtyardFill.position.set(.4,3.8,6.2);courtyardFill.rotation.y=-Math.PI/2;scene.add(courtyardFill);const bounce=new THREE.RectAreaLight(0xffcc91,.35,4,6);bounce.position.set(0,.10,-3.5);bounce.rotation.x=Math.PI/2;scene.add(bounce);
+    const timberBounce=new THREE.RectAreaLight(0xffba79,lighting.timberBounce,4,1.8);timberBounce.position.set(-2.24,1.9,-2.4);timberBounce.rotation.y=-Math.PI/2;scene.add(timberBounce);
+    const libraryGlow=new THREE.RectAreaLight(0xffbb75,lighting.libraryGlow*.40,7,.7);libraryGlow.name='Library_Shelf_Fill';libraryGlow.userData.libraryRole='fill';libraryGlow.position.set(-1.45,8.12,-2.70);libraryGlow.rotation.y=0;scene.add(libraryGlow);
+    // A photographic transmission mask filters illumination, rather than being
+    // applied to the wall. Geometry, PBR response and camera parallax stay live.
+    foliageLight.colorSpace=THREE.NoColorSpace;
+    const leafyDaylight=new THREE.SpotLight(0xffffff,45,14,.8,.5,2);leafyDaylight.color.setRGB(1,.5,.15);leafyDaylight.position.set(-.9,3.45,-2.5);leafyDaylight.target.position.set(2.4,1.7,-3.65);leafyDaylight.map=foliageLight;scene.add(leafyDaylight,leafyDaylight.target);
+    const filteredFloorDaylight=new THREE.SpotLight(0xffffff,65,15,.74,.3,2);filteredFloorDaylight.color.setRGB(1,.46,.13);filteredFloorDaylight.position.set(4.6,3.6,-3.3);filteredFloorDaylight.target.position.set(-.4,0,-2.2);filteredFloorDaylight.map=foliageLight;scene.add(filteredFloorDaylight,filteredFloorDaylight.target);
+    filteredFloorDaylight.castShadow=true;filteredFloorDaylight.shadow.mapSize.set(1024,1024);filteredFloorDaylight.shadow.bias=-.00015;filteredFloorDaylight.shadow.normalBias=.012;
+    const backWallDaylight=new THREE.SpotLight(0xffffff,30,13,.66,.5,2);backWallDaylight.color.setRGB(1,.35,.10);backWallDaylight.position.set(-.3,3.45,-2);backWallDaylight.target.position.set(.85,1.75,-6.97);backWallDaylight.map=foliageLight;scene.add(backWallDaylight,backWallDaylight.target);
+    const courtyardSun=new THREE.SpotLight(0xffffff,lighting.projector,18,.90,.4,2);courtyardSun.color.setRGB(1,.66,.32);courtyardSun.position.set(3.3,8,8.4);courtyardSun.target.position.set(.9,0,4.2);courtyardSun.map=foliageLight;scene.add(courtyardSun,courtyardSun.target);courtyardSun.castShadow=true;courtyardSun.shadow.mapSize.set(1024,1024);courtyardSun.shadow.normalBias=.012;
+    // Bronze wall lights illuminate the plaster above and below each fitting.
+    // Static glow radiance is baked; these small lights provide live PBR highlights.
+    // Baked fixture glow stays on every wall. Four local lights provide nearby
+    // live highlights instead of making every fragment evaluate 55 point lights.
+    const fixtures=[studioSconce.light];let librarySconce=0;
+    for(const [x,y,z,rotation] of decor.lamps){if(isEntryFixture([x,y,z]))continue;const exterior=z>.18,gain=exterior?lighting.exteriorSconceGain:x<-2.3&&y<space.upperFloor&&z<.16?lighting.studioFixtureGain:1;const light=new THREE.PointLight(0xffb45f,.95*gain,exterior?4.25:1.85,2);light.position.set(x+Math.sin(rotation)*.09,y-.22,z+Math.cos(rotation)*.09);if(y>space.upperFloor&&inLibraryInterior({x,y:space.upperFloor,z})){light.userData.librarySlot=librarySconce++;light.name=`Library_Sconce_${librarySconce}`;}fixtures.push(light);}
+    for(const [x,y,z] of decor.stairLamps){const light=new THREE.PointLight(0xffbd75,1.15*lighting.exteriorSconceGain,4.25,2);light.position.set(x-.12,y-.20,z);fixtures.push(light);}
+    for(const [x,y,z] of decor.stepLights){const light=new THREE.PointLight(0xffcc8a,.25,.62,2);light.position.set(x-.07,y,z);fixtures.push(light);}
+    // Former round-light energy is spread through these existing linear and
+    // broad room fixtures; their shared layout preserves ambient brightness.
+    const ceilingGroups=new Map();
+    for(const fixture of [...decor.interiorStrips,...decor.interiorFill]){
+      const key=fixture.position[1]>space.upperFloor?'upper':fixture.position[0]<-2.3?'left':'right';
+      if(!ceilingGroups.has(key))ceilingGroups.set(key,[]);ceilingGroups.get(key).push(fixture);
+    }
+    for(const group of ceilingGroups.values()){
+      const minX=Math.min(...group.map(f=>f.position[0]-f.width/2)),maxX=Math.max(...group.map(f=>f.position[0]+f.width/2));
+      const minZ=Math.min(...group.map(f=>f.position[2]-(f.height??.035)/2)),maxZ=Math.max(...group.map(f=>f.position[2]+(f.height??.035)/2));
+      const width=maxX-minX,height=maxZ-minZ,energy=group.reduce((sum,f)=>sum+f.intensity*(f.height?.8:.68)*f.width*(f.height??.035),0);
+      const light=new THREE.RectAreaLight(0xffffff,energy/(width*height),width,height);light.color.setRGB(...group[0].color);
+      if(group[0].position[1]>space.upperFloor){light.intensity*=.45;light.name='Library_Ceiling_Fill';light.userData.libraryRole='ceiling';}
+      else if(group[0].position[0]<-2.3)light.intensity*=lighting.studioFixtureGain;
+      light.position.set((minX+maxX)/2,group[0].position[1]-.018,(minZ+maxZ)/2);light.rotation.x=-Math.PI/2;scene.add(light);
+    }
+    for(const light of fixtures)if(light.position.y>space.upperFloor)light.intensity*=.5;
+    await yieldScenePreparation(signal);
+    const plantMaterials=new Map(),staticPlants=[];
+    function plantMaterial(original){
+      if(plantMaterials.has(original))return plantMaterials.get(original);
+      // Leaves are diffuse surfaces. Their scanned color, native silhouettes and
+      // real sunlight shadows do not need the architecture's glossy PBR shader.
+      const material=new THREE.MeshLambertMaterial({color:original.color,map:original.map,side:THREE.DoubleSide,alphaTest:original.alphaTest||.4});
+      material.onBeforeCompile=filterFoliageLight;material.shadowSide=THREE.DoubleSide;
+      plantMaterials.set(original,material);return material;
+    }
+    function vegetation(source,x,z,height,baseY=0,rotation=0,widthScale=1,{hideWood=false,leafFans=1}={}){
+      const obj=source.scene.clone(true);const cube=obj.getObjectByName('Cube');if(source===tree&&cube)obj.remove(cube);
+      const bounds=new THREE.Box3().setFromObject(obj),size=bounds.getSize(new THREE.Vector3());
+      const scale=height/size.y;obj.scale.set(scale*widthScale,scale,scale*widthScale);
+      const centered=source!==tree;
+      obj.position.set(x-(centered?(bounds.min.x+bounds.max.x)/2*scale*widthScale:0),baseY-bounds.min.y*scale,z-(centered?(bounds.min.z+bounds.max.z)/2*scale*widthScale:0));obj.rotation.y=rotation;
+      if(leafFans>1)addBranchLeaves(obj,leafFans);
+      if(hideWood)removeTreeWood(obj);
+      obj.traverse(mesh=>{if(mesh.isMesh){mesh.castShadow=true;mesh.receiveShadow=true;(Array.isArray(mesh.material)?mesh.material:[mesh.material]).forEach(mat=>{mat.onBeforeCompile=filterFoliageLight;if(mat.map)mat.map.anisotropy=maximumAnisotropy;if(mat.alphaMap||mat.alphaTest||mat.transparent){mat.alphaTest=.4;mat.depthWrite=true;mat.transparent=false;mat.side=THREE.DoubleSide;mat.shadowSide=THREE.DoubleSide;}if(source===tree){mat.roughnessMap=null;mat.roughness=.72;}mat.envMapIntensity=1.1;});}});
+      obj.traverse(mesh=>{if(mesh.isMesh)mesh.material=Array.isArray(mesh.material)?mesh.material.map(plantMaterial):plantMaterial(mesh.material);});
+      scene.add(obj);staticPlants.push(obj);return obj;
+    }
+    if(import.meta.env.DEV)canvas.dataset.gardenVisuals=JSON.stringify({roots:gardenLayout.roots.length,styles:[...new Set(gardenLayout.roots.map(r=>r.style))],leafVariants:gardenLayout.leafVariants,wallGrowth:gardenLayout.wallGrowthMode,canopyHeights:gardenLayout.canopyTrees.map(p=>p[2])});
+    for(const [x,z,h,y,rotation,width,hideWood] of gardenLayout.canopyTrees)vegetation(tree,x,z,h,y,rotation,width,{hideWood});
+    for(const [x,z,h,y,rotation,width] of gardenLayout.bedTrees)vegetation(tree,x,z,h,y,rotation,width);
+    for(const [x,z,h,y,rotation,width] of gardenLayout.roomTrees)vegetation(tree,x,z,h,y+lounge.floor,rotation,width);
+    for(const pot of gardenLayout.stairWallPots){const [x,z]=pot.position;vegetation(tree,x,z,pot.plantHeight,pot.potHeight+.016,pot.rotation,pot.widthScale);}
+    for(const pot of gardenLayout.rightAtelier.pots){const [x,z]=pot.position;vegetation(tree,x,z,pot.plantHeight,pot.height+lounge.floor,pot.rotation,pot.widthScale);}
+    const libraryTree=gardenLayout.library.tree;
+    vegetation(tree,...libraryTree.position,libraryTree.height,space.upperFloor+libraryTree.baseOffset,libraryTree.rotation,libraryTree.widthScale,{leafFans:libraryTree.leafFans});
+    // Low foliage stays beneath the exhibition's paper edges.
+    vegetation(tree,lounge.work.plant[0],lounge.work.plant[2],.15,lounge.work.plant[1],.2,1.2);
+    for(const pot of gardenLayout.loosePots){const [x,z]=pot.position;vegetation(pot.asset==='plantA'?plantA:plantB,x,z,pot.height,z<lounge.room[3]?lounge.floor:0,pot.rotation);}
+    await yieldScenePreparation(signal);
+    const garden=vines.scene;
+    garden.userData.entryPrepared=true;
+    const entryFoliage=clearEntryFoliage(garden)+staticPlants.reduce((sum,plant)=>sum+clearEntryFoliage(plant),0);
+    canvas.dataset.entryDoor=JSON.stringify({...entryChanges,removedFoliageTriangles:entryFoliage});
+    await yieldScenePreparation(signal);
+    garden.traverse(o=>{if(o.name.includes('roof-cornice'))o.visible=false;if(o.isMesh){o.castShadow=true;o.receiveShadow=true;o.material=Array.isArray(o.material)?o.material.map(plantMaterial):plantMaterial(o.material);}});scene.add(garden);
+    const floweringCornices=createFloweringCornices({foliage:plantB.scene}),corniceMaterials=new Set();floweringCornices.traverse(o=>{if(o.isMesh&&!corniceMaterials.has(o.material)){corniceMaterials.add(o.material);const shade=o.material.onBeforeCompile;o.material.onBeforeCompile=shader=>{shade.call(o.material,shader);filterFoliageLight(shader);};}});garden.add(floweringCornices);
+    await yieldScenePreparation(signal);
+    const oak=new THREE.MeshStandardMaterial({color:0xb18a59,roughness:.70});oak.onBeforeCompile=shader=>{filterFoliageLight(shader);applyAgedFinish(shader,'oak',finishNoise);};oak.customProgramCacheKey=()=> 'atelier-aged-frame-oak-v2';
+    const raycaster=new THREE.Raycaster();raycaster.firstHitOnly=true;
+    function frame(id,texture,{x,y,z,width=1.15,height=1.56,rotation=0}){
+      texture.anisotropy=maximumAnisotropy;
+      // Matte paper retains its printed contrast under the brighter room lights.
+      // Cap incident diffuse irradiance, retaining live shadows and warm tint.
+      const body=createExhibitBody({width,height},oak,new THREE.MeshPhysicalMaterial({map:texture,color:0xffffff,roughness:.97,specularIntensity:.12}));
+      const {root:group,backing,print}=body;group.position.set(x,y,z);group.rotation.y=rotation;occluders.push(backing);
+      print.material.onBeforeCompile=shader=>{
+        filterFoliageLight(shader);
+        shader.fragmentShader=shader.fragmentShader.replace('#include <lights_fragment_end>',`#include <lights_fragment_end>
+          vec3 paperIrradiance=(reflectedLight.directDiffuse+reflectedLight.indirectDiffuse)/max(diffuseColor.rgb,vec3(.001));
+          float paperPeak=max(paperIrradiance.r,max(paperIrradiance.g,paperIrradiance.b));
+          float paperScale=min(1.0,1.05/max(paperPeak,.001));
+          reflectedLight.directDiffuse*=paperScale;
+          reflectedLight.indirectDiffuse*=paperScale;`);
+      };
+      print.material.customProgramCacheKey=()=> 'atelier-matte-print-v1';
+      print.receiveShadow=true;print.position.z=.029;print.userData.contentId=id;group.add(print);interactables.push(print);
+      const cueGroup=new THREE.Group();cueGroup.position.z=.037;const cueMat=new THREE.MeshBasicMaterial({color:new THREE.Color().setRGB(0,.40,3.2),transparent:true,opacity:1,depthWrite:false,toneMapped:false});
+      const thickness=Math.min(.025,width*.028),gap=Math.min(.012,width*.04);
+      const sides=[[-width/2-gap,0,thickness,height+gap*3],[width/2+gap,0,thickness,height+gap*3],[0,-height/2-gap,width+gap*3,thickness],[0,height/2+gap,width+gap*3,thickness]];
+      for(let layer=0;layer<=3;layer++){
+        const parts=sides.map(([px,py,w,h])=>new THREE.PlaneGeometry(w<.1?w+layer*.018:w,h<.1?h+layer*.018:h).translate(px,py,.0002*layer));
+        const geometry=mergeGeometries(parts);parts.forEach(part=>part.dispose());
+        const material=layer?cueMat.clone():cueMat;if(layer){material.blending=THREE.AdditiveBlending;material.opacity=.09/layer;}
+        cueGroup.add(new THREE.Mesh(geometry,material));
+      }
+      group.add(cueGroup);if(!cues.has(id))cues.set(id,[]);cues.get(id).push({group:cueGroup,material:cueMat,exhibit:group});scene.add(group);return group;
+    }
+    const pages=exhibitionPages(content.projects),contentEntries=[],exhibits=[];
+    const [left,right,back,front]=bench.bounds;
+    const benchTarget=new THREE.Mesh(new THREE.BoxGeometry(right-left+.025,.075,front-back+.025),new THREE.MeshBasicMaterial({visible:false}));
+    benchTarget.name='Terrace_Bench_Interaction';benchTarget.position.set((left+right)/2,bench.seatTop-.025,(back+front)/2);benchTarget.userData.contentId=bench.id;scene.add(benchTarget);interactables.push(benchTarget);
+    contentEntries.push({id:bench.id,kind:'seat',seat:bench,root:benchTarget,floor:0,focus:new THREE.Vector3(0,.038,0)});
+    const [sl,sr,sb,sf]=sofa.seatBounds;
+    const sofaTarget=new THREE.Mesh(new THREE.BoxGeometry(sr-sl,.035,sf-sb),new THREE.MeshBasicMaterial({visible:false}));
+    sofaTarget.name='Library_Sofa_Interaction';sofaTarget.position.set((sl+sr)/2,sofa.seatTop+.012,(sb+sf)/2);sofaTarget.userData.contentId=sofa.id;
+    scene.add(sofaTarget);interactables.push(sofaTarget);
+    contentEntries.push({id:sofa.id,kind:'seat',seat:sofa,root:sofaTarget,floor:sofa.floor,focus:new THREE.Vector3(0,.019,0)});
+    const [ll,lr,lb,lf]=sunkenSofa.seatBounds;
+    const loungeTarget=new THREE.Mesh(new THREE.BoxGeometry(lr-ll,.035,lf-lb),new THREE.MeshBasicMaterial({visible:false}));loungeTarget.name='Sunken_Lounge_Interaction';loungeTarget.position.set((ll+lr)/2,sunkenSofa.seatTop+.012,(lb+lf)/2);loungeTarget.userData.contentId=sunkenSofa.id;
+    scene.add(loungeTarget);interactables.push(loungeTarget);contentEntries.push({id:sunkenSofa.id,kind:'seat',seat:sunkenSofa,root:loungeTarget,floor:sunkenSofa.floor,focus:new THREE.Vector3(0,.019,0)});let galleryPage=0;
+    for(const [page,items] of pages.entries())for(const item of items){
+      const index=content.projects.findIndex(project=>project.id===item.id),project=content.projects[index];
+      const root=frame(project.id,createExhibitPrint(project,...projectImages[index]),item.slot);root.visible=page===0;
+      exhibits.push({root,page});contentEntries.push({id:project.id,kind:'project',root,floor:lounge.floor,size:item.slot,focus:new THREE.Vector3(0,0,.03)});
+    }
+    const deskObjects=createDeskObjects({profileScreen:deskTextures[0],contactFace:deskTextures[1],contactTitle:deskTextures[2],tabletIdle:deskTextures[3]},space.upperFloor);
+    for(const entry of deskObjects){scene.add(entry.root);interactables.push(...entry.meshes);cues.set(entry.id,[entry.cue]);entry.proximity=new THREE.Vector3(0,.03,0);contentEntries.push(entry);}
+    function setGalleryPage(page){galleryPage=Math.max(0,Math.min(Math.max(0,pages.length-1),page));for(const exhibit of exhibits)exhibit.root.visible=exhibit.page===galleryPage;callbacks.onGallery?.({page:galleryPage,total:pages.length,count:content.projects.length});}
+    setGalleryPage(0);
+    await yieldScenePreparation(signal);
+    waterNormal.wrapS=waterNormal.wrapT=THREE.RepeatWrapping;
+    const waterInset=space.poolWaterInset;
+    const water=new Water(new THREE.PlaneGeometry(poolRight-poolLeft-waterInset*2,poolFront-poolBack-waterInset*2),{textureWidth:512,textureHeight:512,waterNormals:waterNormal,sunDirection:new THREE.Vector3(9,5.5,10).normalize(),sunColor:0xffbf7b,waterColor:0x088f94,distortionScale:1.65,alpha:.95,fog:true});water.material.uniforms.size.value=12;
+    water.material.fragmentShader=water.material.fragmentShader.replace('vec3( 1.5, 1.0, 1.5 )','vec3( 1.10, 1.0, 1.10 )').replace('float rf0 = 0.02;', 'float rf0 = 0.06;').replace('100.0, 2.0, 0.5','70.0, 3.0, 0.5').replace('diffuseLight * 0.3','diffuseLight * 0.12').replace('max( 0.0, dot( surfaceNormal, eyeDirection ) ) * waterColor','(0.62 + 0.38 * max( 0.0, dot( surfaceNormal, eyeDirection ) )) * waterColor');
+    // Indoor projector shadows do not extinguish exterior sunlight. Preserve
+    // sky/underwater scattering when the pergola blocks direct illumination.
+    water.material.fragmentShader=water.material.fragmentShader.replace('#include <shadowmask_pars_fragment>',THREE.ShaderChunk.shadowmask_pars_fragment.replace(/#if NUM_SPOT_LIGHT_SHADOWS > 0[\s\S]*?#endif/,''));
+    water.material.fragmentShader=water.material.fragmentShader.replace('( sunColor * diffuseLight * 0.12 + scatter ) * getShadowMask(), reflectionSample + specularLight','scatter * (0.4 + 0.6 * getShadowMask()) + sunColor * diffuseLight * 0.12 * getShadowMask(), reflectionSample + specularLight * getShadowMask()');
+    poolCaustics.colorSpace=THREE.NoColorSpace;poolCaustics.wrapS=poolCaustics.wrapT=THREE.RepeatWrapping;poolCaustics.anisotropy=maximumAnisotropy;
+    water.material.uniforms.tPoolCaustics={value:poolCaustics};
+    water.material.fragmentShader=water.material.fragmentShader.replace('void main() {',`uniform sampler2D tPoolCaustics;
+    float poolCaustic(vec2 uv){
+      uv+=vec2(sin(uv.y*4.1+time*.4),cos(uv.x*4.3-time*.3))*.032;
+      float light=texture2D(tPoolCaustics,uv+vec2(time*.009,-time*.006)).r;
+      float crossing=texture2D(tPoolCaustics,uv*1.37+vec2(-time*.008,time*.005)+.31).r;
+      return light*.8+crossing*.2;
+    }
+    void main() {`).replace('vec3 outgoingLight = albedo;','vec3 outgoingLight = albedo + sunColor * poolCaustic(worldPosition.xz * .85) * .12 * (1.0-reflectance) * getShadowMask();');
+    water.material.side=THREE.DoubleSide;
+    water.material.fragmentShader=water.material.fragmentShader.replace('gl_FragColor = vec4( outgoingLight, alpha );','if(!gl_FrontFacing)outgoingLight=mix(outgoingLight,waterColor,0.62)+vec3(0.04,0.09,0.10);\n gl_FragColor = vec4( outgoingLight, alpha );');
+    water.rotation.x=-Math.PI/2;water.position.set((poolLeft+poolRight)/2,space.poolMotion.waterLevel,(poolBack+poolFront)/2);water.receiveShadow=true;scene.add(water);
+    // Polished stone uses the sunset environment and live PBR highlights.
+    // Avoid a second full courtyard render for a faint floor overlay.
+    const waterRender=water.onBeforeRender;let lastReflection=-Infinity;
+    const reflectedPosition=new THREE.Vector3(Infinity,Infinity,Infinity),reflectedRotation=new THREE.Quaternion();
+    water.onBeforeRender=function(r,s,c){
+      if(c!==camera||s.overrideMaterial)return;
+      const moving=reflectedPosition.distanceToSquared(c.position)>.000001||reflectedRotation.angleTo(c.quaternion)>.0001;
+      const now=performance.now();if(now-lastReflection<1000/(moving?(quality<1?24:30):8))return;
+      lastReflection=now;reflectedPosition.copy(c.position);reflectedRotation.copy(c.quaternion);waterRender.call(this,r,s,c);
+    };
+    const target=new THREE.WebGLRenderTarget(1,1,{type:THREE.HalfFloatType});
+    const composer=new EffectComposer(renderer,target);resources.composer=composer;composer.addPass(new RenderPass(scene,camera));
+    // Baked shadows retain contact detail without a second normal render or
+    // a 41-sample depth-of-field pass on every pixel.
+    const bloom=new UnrealBloomPass(new THREE.Vector2(1,1),.24,.25,1.5);composer.addPass(bloom);
+    // Grade, underwater attenuation and tone mapping share one full-size pass.
+    const output=new OutputPass();
+    Object.assign(output.uniforms,{grade:{value:new THREE.Vector3(...lighting.grade)},depth:{value:0},time:{value:0}});
+    output.material.fragmentShader=output.material.fragmentShader.replace('uniform sampler2D tDiffuse;','uniform sampler2D tDiffuse; uniform vec3 grade; uniform float depth; uniform float time;')
+      .replace('gl_FragColor = texture2D( tDiffuse, vUv );',`
+        float wet=smoothstep(0.0,0.14,depth);
+        vec2 uv=vUv+vec2(sin(vUv.y*24.0+time*1.6),cos(vUv.x*21.0-time*1.4))*.0009*wet;
+        gl_FragColor=texture2D(tDiffuse,uv);gl_FragColor.rgb*=grade;
+        vec3 attenuation=exp(-vec3(.85,.18,.08)*depth);
+        gl_FragColor.rgb=mix(gl_FragColor.rgb,gl_FragColor.rgb*attenuation+vec3(.01,.12,.12)*(1.0-exp(-depth*.6)),wet);`);
+    // SMAA smooths geometric edges without full-screen FXAA blur or the
+    // multisampled HDR buffers that strain integrated GPUs at native pixels.
+    composer.addPass(new SMAAPass());composer.addPass(output);
+    // One shared world transform enlarges geometry, foliage and lighting,
+    // while eye height stays 1.53m in real world space.
+    const world=new THREE.Group();const children=[...scene.children];scene.add(world);for(const child of children)world.add(child);world.matrixAutoUpdate=false;const [sx,sy,sz]=space.worldScale;world.matrix.set(sx,0,sx*space.worldShear,0,0,sy,0,0,0,0,sz,0,0,0,0,1);
+    const lightPool=Array.from({length:4},()=>{const light=new THREE.PointLight(0xffffff,0,1,2);world.add(light);return light;});
+    // Irradiance from all fixtures is already in the full-resolution lightmap.
+    // Pin the room pair while occupied; rank nearby sources elsewhere.
+    const areaFixtures=world.children.filter(o=>o.isRectAreaLight);
+    for(const light of areaFixtures)world.remove(light);
+    const areaPool=Array.from({length:2},()=>{const light=new THREE.RectAreaLight(0xffffff,0,1,1);world.add(light);return light;});
+    // Fixtures and their world transform are static. Retain ranking records
+    // instead of rebuilding vectors/arrays during every lighting update.
+    const rankRecords=lights=>lights.map((light,index)=>({light,index,position:light.position.clone().applyMatrix4(world.matrix),score:0}));
+    const ranked=rankRecords(fixtures),areas=rankRecords(areaFixtures),lastLightPosition=new THREE.Vector3(NaN,NaN,NaN);
+    const byScore=(a,b)=>b.score-a.score||a.index-b.index;
+    let lastLightUpdate=-1,lastLightQuality,libraryInside=false,lightPlan;
+    function bindLight(target,source,fade){
+      if(target.userData.source!==source){target.intensity=fade?0:source.intensity;target.userData.source=source;}
+      target.position.copy(source.position);target.color.copy(source.color);
+      if(target.isRectAreaLight){target.quaternion.copy(source.quaternion);target.width=source.width;target.height=source.height;}
+      else target.distance=source.distance;
+    }
+    function updateLocalLights(time,delta=.2){
+      const inside=inLibraryInterior(controller.position,controller.onRail,libraryInside);
+      if(inside!==libraryInside||time-lastLightUpdate>=.2||lastLightUpdate<0){
+        const initial=lastLightUpdate<0,changed=inside!==libraryInside;libraryInside=inside;
+        if(initial||changed||lastLightQuality!==quality||!lastLightPosition.equals(camera.position)){
+          for(const item of ranked){
+            const {light,position}=item,distance=position.distanceTo(camera.position),falloff=Math.max(0,1-(distance/light.distance)**4);
+            item.score=light.intensity*falloff*falloff/Math.max(.1,distance*distance);
+          }
+          for(const item of areas){const {light,position}=item;item.score=light.intensity*light.width*light.height/Math.max(1,position.distanceToSquared(camera.position));}
+          ranked.sort(byScore);areas.sort(byScore);
+          lightPlan=libraryLightPlan(inside,quality,ranked.map(item=>item.light),areas.map(item=>item.light));
+          lightPlan.points.forEach(({light},i)=>bindLight(lightPool[i],light,changed&&!initial));
+          lightPlan.areas.forEach(({light},i)=>bindLight(areaPool[i],light,changed&&!initial));
+          lastLightPosition.copy(camera.position);lastLightQuality=quality;
+          if(initial||changed)canvas.dataset.libraryLighting=JSON.stringify({inside,mode:inside?'on':'ambient',points:lightPlan.points.map(({light})=>light.name),areas:lightPlan.areas.map(({light})=>light.name)});
+        }
+        lastLightUpdate=time;
+      }
+      for(let i=0;i<lightPlan.points.length;i++)lightPool[i].intensity=THREE.MathUtils.damp(lightPool[i].intensity,lightPlan.points[i].intensity,18,delta);
+      for(let i=0;i<lightPlan.areas.length;i++)areaPool[i].intensity=THREE.MathUtils.damp(areaPool[i].intensity,lightPlan.areas[i].intensity,18,delta);
+    }
+    const metricPoint=(x,y,z,eye=0)=>new THREE.Vector3(...worldPoint(x,y,z,eye));
+    const targets=[...interactables,...occluders];
+    let collisionBatch=performance.now();
+    for(const mesh of occluders){if(!mesh.geometry.boundsTree)mesh.geometry.boundsTree=new MeshBVH(mesh.geometry);mesh.raycast=acceleratedRaycast;if(performance.now()-collisionBatch>=8){await yieldScenePreparation(signal);collisionBatch=performance.now();}}
+    if(import.meta.env.DEV&&new URLSearchParams(location.search).has('geometryQA')){
+      // Probe the actual loaded shell, not the collision rectangles. This catches
+      // missing faces beside the entrance and exposed horizons at terrace edges.
+      scene.updateMatrixWorld(true);const shell=[...closureMeshes];architecture.scene.traverse(o=>{if(o.isMesh)shell.push(o);});
+      const probe=new THREE.Raycaster();probe.firstHitOnly=true;probe.near=.001;probe.far=30;
+      const origins=[[-5.07,5.5],[3.6,6.5],[0,7],[-2.7,.5],[3.5,.7],[0,.65]],uncovered=[];
+      for(const [x,z] of origins)for(const pitch of [-.35,0,.1])for(let i=0;i<16;i++){
+        const angle=i*Math.PI/8;probe.set(metricPoint(x,0,z,1.53),new THREE.Vector3(Math.sin(angle)*Math.cos(pitch),Math.sin(pitch),Math.cos(angle)*Math.cos(pitch)));
+        if(!probe.intersectObjects(shell,false).length)uncovered.push({x,z,pitch,angle});
+      }
+      canvas.dataset.courtyardShell=JSON.stringify({rays:origins.length*48,uncovered});
+      const upperOrigins=[[-2.7,.5],[2.0,1.0],[-4,.5],[1.9,.5],[3.15,.65]],upperUncovered=[];
+      for(const [x,z] of upperOrigins)for(const pitch of [-.35,-.1,0])for(let i=0;i<16;i++){
+        const angle=i*Math.PI/8;probe.set(metricPoint(x,space.upperFloor,z,1.53),new THREE.Vector3(Math.sin(angle)*Math.cos(pitch),Math.sin(pitch),Math.cos(angle)*Math.cos(pitch)));
+        if(!probe.intersectObjects(shell,false).length)upperUncovered.push({x,z,pitch,angle});
+      }
+      canvas.dataset.upperShell=JSON.stringify({rays:upperOrigins.length*48,uncovered:upperUncovered});
+      // Test the rendered masonry, not just navigation rectangles, along the
+      // staircase. A wrongly sized wall can otherwise hide inside a valid path.
+      const obstructions=[];let clearanceRays=0;
+      for(let i=1;i<space.stairRoute.length;i++){
+        const a=space.stairRoute[i-1],b=space.stairRoute[i],steps=Math.ceil(Math.hypot(b.x-a.x,b.z-a.z)/.10);
+        for(let j=0;j<steps;j++)for(const height of [.45,1.0,1.53]){
+          const t=j/steps,u=(j+1)/steps,from=metricPoint(a.x+(b.x-a.x)*t,a.y+(b.y-a.y)*t,a.z+(b.z-a.z)*t,height),to=metricPoint(a.x+(b.x-a.x)*u,a.y+(b.y-a.y)*u,a.z+(b.z-a.z)*u,height),direction=to.clone().sub(from),length=direction.length();
+          probe.near=.005;probe.far=length;probe.set(from,direction.normalize());clearanceRays++;
+          const hit=probe.intersectObjects(shell,false)[0];if(hit)obstructions.push({segment:i,x:from.x,y:from.y,z:from.z,distance:hit.distance});
+        }
+      }
+      canvas.dataset.stairClearance=JSON.stringify({rays:clearanceRays,obstructions});
+      // Full-width downward probes catch missing tread/landing corners that
+      // center-line body rays cannot detect. Require the same stone material.
+      let floorRays=0;const floorGaps=[];
+      function checkStone(p,h,zone){
+        probe.near=.001;probe.far=.6;probe.set(metricPoint(p.x,h,p.z,.25),new THREE.Vector3(0,-1,0));floorRays++;
+        const hit=probe.intersectObjects(shell,false)[0];
+        const mat=hit&&(Array.isArray(hit.object.material)?hit.object.material[hit.face.materialIndex]:hit.object.material);
+        if(!hit||mat.name!=='Warm_Pale_Limestone'||Math.abs(hit.point.y-h*space.worldScale[1])>.025)floorGaps.push({zone,x:p.x,z:p.z,h,material:mat?.name,hitY:hit?.point.y});
+      }
+      for(const f of space.stairs.flights)for(let i=0;i<f.steps;i++)for(const fraction of [.06,.5,.94])for(const side of [-.94,-.5,0,.5,.94]){
+        const p=flightPoint(f,(i+fraction)/f.steps,side*f.width/2);checkStone(p,f.bottom+(i+1)*(f.top-f.bottom)/f.steps,'tread');
+      }
+      for(const [polygon,h,zone] of [[space.stairs.landing,space.stairs.landingHeight,'landing'],[space.upperOutline,space.upperFloor,'arrival']]){
+        const xa=zone==='arrival'?2.75:Math.min(...polygon.map(p=>p[0]))+.12,xb=zone==='arrival'?5.1:Math.max(...polygon.map(p=>p[0]))-.12;
+        const za=zone==='arrival'?.24:Math.min(...polygon.map(p=>p[1]))+.12,zb=zone==='arrival'?.8:Math.max(...polygon.map(p=>p[1]))-.12;
+        for(let x=xa;x<xb;x+=.15)for(let z=za;z<zb;z+=.13)if(inPolygon(x,z,polygon)&&(zone!=='arrival'||canStand(x,z,.05,h)))checkStone({x,z},h,zone);
+      }
+      canvas.dataset.stairFloorCoverage=JSON.stringify({rays:floorRays,gaps:floorGaps});
+      const upperStart={x:3.05,z:.45,y:space.upperFloor},upperPassage=routeBetween(upperStart,LIBRARY),upperBlocks=[];let upperPassageRays=0,previous=upperStart;
+      for(const next of upperPassage){
+        const steps=Math.ceil(Math.hypot(next.x-previous.x,next.z-previous.z)/.10);
+        for(let j=0;j<steps;j++)for(const height of [.45,1,1.53]){
+          const t=j/steps,u=(j+1)/steps,from=metricPoint(previous.x+(next.x-previous.x)*t,space.upperFloor,previous.z+(next.z-previous.z)*t,height),to=metricPoint(previous.x+(next.x-previous.x)*u,space.upperFloor,previous.z+(next.z-previous.z)*u,height),direction=to.clone().sub(from);
+          probe.near=.005;probe.far=direction.length();probe.set(from,direction.normalize());upperPassageRays++;
+          if(probe.intersectObjects(shell,false).length)upperBlocks.push({x:from.x,y:from.y,z:from.z});
+        }
+        previous=next;
+      }
+      canvas.dataset.upperPassageClearance=JSON.stringify({rays:upperPassageRays,obstructions:upperBlocks,reachable:upperPassage.length>0});
+      const passages=[[{x:-3.75,z:3.45},{x:-3.75,z:-.65}],[{x:-4.75,z:3.45},{x:1.3,z:3.45}],...Array.from({length:5},(_,i)=>[{x:.4+i*.32,z:7.4},{x:.4+i*.32,z:4.6}])];
+      const passageObstructions=[];let passageRays=0;
+      for(let i=0;i<passages.length;i++){
+        const [a,b]=passages[i],steps=Math.ceil(Math.hypot(b.x-a.x,b.z-a.z)/.10);
+        for(let j=0;j<steps;j++)for(const height of [.45,1.0,1.53]){
+          const t=j/steps,u=(j+1)/steps,from=metricPoint(a.x+(b.x-a.x)*t,0,a.z+(b.z-a.z)*t,height),to=metricPoint(a.x+(b.x-a.x)*u,0,a.z+(b.z-a.z)*u,height),direction=to.clone().sub(from);
+          probe.near=.005;probe.far=direction.length();probe.set(from,direction.normalize());passageRays++;
+          const hit=probe.intersectObjects(shell,false)[0];if(hit)passageObstructions.push({passage:i,x:from.x,y:from.y,z:from.z,distance:hit.distance});
+        }
+      }
+      canvas.dataset.passageClearance=JSON.stringify({rays:passageRays,obstructions:passageObstructions});
+      let wallRays=0;const wallGaps=[];
+      for(const f of space.stairs.flights)for(let i=0;i<=8;i++){
+        const t=i/8,p=flightPoint(f,t,f.width/2),x=eastBoundary(p.z);
+        for(const eye of [.6,1.53]){
+          probe.near=.001;probe.far=.20;probe.set(metricPoint(x-.055,p.y,p.z,eye),new THREE.Vector3(1,0,0));wallRays++;
+          if(!probe.intersectObjects(shell,false).length)wallGaps.push({x,z:p.z,height:p.y+eye/space.worldScale[1]});
+        }
+      }
+      canvas.dataset.eastWallFit=JSON.stringify({rays:wallRays,gaps:wallGaps});
+      const plasterShell=shell.filter(o=>!Array.isArray(o.material)&&o.material?.name==='Ivory_Mineral_Plaster');
+      const seams=[];let flatRays=0;
+      for(const [wallX,baseY,zs] of [[2.30,0,[-6.7,-5.2,-3.7,-2.2]],[space.upperClosure[0],space.upperFloor,[-3.20,-2.20,-1.20,-.20,.09]]])for(const z of zs)for(const eye of [.40,1.53,2.45]){
+        const origin=metricPoint(wallX-.35,baseY,z,eye);probe.near=.001;probe.far=.6;probe.set(origin,new THREE.Vector3(1,0,0));flatRays++;
+        const hit=probe.intersectObjects(plasterShell,false)[0];
+        if(!hit||Math.abs(hit.distance-.35*space.worldScale[0])>.012)seams.push({wallX,z,eye,distance:hit?.distance});
+      }
+      canvas.dataset.wallFlatness=JSON.stringify({rays:flatRays,seams});
+      const finishGaps=[];let finishRays=0;
+      // The far east end of the front return is hidden behind solid treads;
+      // finish probes cover its exposed face, and tread probes cover that end.
+      const returnA=space.lowerCornerClosure[3],returnB=space.lowerCornerClosure[0];
+      const finishWalls=[{a:[-2.289,-6.989],b:[2.289,-6.989],base:0},{a:[-5.302,facadeZ(-5.302)-.12],b:[-5.302,-3.321],base:0},{a:[-2.553,-1.20],b:[-2.18,.13],base:0},{a:[2.149,-3.329],b:[2.149,.149],base:space.upperFloor},{a:[2.18,.169],b:[3.4,.169],base:0,top:space.upperFloor-.30},{a:returnA,b:returnB,base:0,top:space.upperFloor-.30,timberTop:true}];
+      function facadeZ(x){const [a,b]=space.balconyFront;return a[1]+(b[1]-a[1])*(x-a[0])/(b[0]-a[0]);}
+      for(const wall of finishWalls){const dx=wall.b[0]-wall.a[0],dz=wall.b[1]-wall.a[1],length=Math.hypot(dx,dz),nx=-dz/length,nz=dx/length;
+        for(const t of [.12,.43,.77,.96]){const x=wall.a[0]+dx*t,z=wall.a[1]+dz*t,top=wall.top??(wall.base?space.upperCeiling:space.groundCeiling-.10+Math.max(0,-z-3.4)*.094);
+          for(const y of [wall.base+.04,wall.base+.16,wall.base+1.5,top-.13]){
+            const from=metricPoint(x+nx*.16,y,z+nz*.16),to=metricPoint(x,y,z);probe.near=.001;probe.far=.30;probe.set(from,to.sub(from).normalize());finishRays++;
+            const hit=probe.intersectObjects(shell,false)[0],allowed=y>top-.24&&!wall.timberTop?['White_Satin_Ceiling']:['Warm_Oak','Oak_Shaded_Edges'];if(!hit||!allowed.includes(hit.object.material?.name))finishGaps.push({x,y,z,material:hit?.object.material?.name});
+          }
+        }
+      }
+      canvas.dataset.interiorFinish=JSON.stringify({rays:finishRays,gaps:finishGaps});
+      const tops=[[-5.48,7],[0,space.courtyard[3]+.10],[eastBoundary(5)+.1,5],[2.5,-2]],heightSeams=[];
+      for(const [x,z] of tops){probe.near=.001;probe.far=.8;probe.set(metricPoint(x,space.courtyardHeight+.4,z),new THREE.Vector3(0,-1,0));const hit=probe.intersectObjects(shell,false)[0];if(!hit||Math.abs(hit.point.y-(space.courtyardHeight+.11)*space.worldScale[1])>.012)heightSeams.push({x,z,height:hit?.point.y});}
+      canvas.dataset.wallTopAlignment=JSON.stringify({rays:tops.length,seams:heightSeams});
+      const nativeRails=[{a:space.balconyRail[0],b:space.balconyRail[1],ha:space.upperFloor,hb:space.upperFloor},...space.stairs.sections.slice(1).map((b,i)=>({a:space.stairs.sections[i].edge[0],b:b.edge[0],ha:space.stairs.sections[i].height,hb:b.height}))],railGaps=[];let railRays=0;
+      for(const r of nativeRails)for(const t of [.22,.53,.81]){const x=r.a[0]+(r.b[0]-r.a[0])*t,z=r.a[1]+(r.b[1]-r.a[1])*t,y=r.ha+(r.hb-r.ha)*t+1.092;probe.near=.001;probe.far=.22;probe.set(metricPoint(x,y+.08,z),new THREE.Vector3(0,-1,0));railRays++;const hit=probe.intersectObjects(shell,false)[0];if(!hit||Math.abs(hit.point.y-y*space.worldScale[1])>.022)railGaps.push({x,z,height:hit?.point.y,expected:y*space.worldScale[1]});}
+      canvas.dataset.railMeshFit=JSON.stringify({rays:railRays,gaps:railGaps});
+
+      const mountingGaps=[];let mountingRays=0;
+      const bronze=shell.filter(o=>o.material?.name==='Bronze'),ceilingShell=shell.filter(o=>o.material?.name==='White_Satin_Ceiling');
+      for(const strip of decor.interiorStrips)for(const offset of [-.40,0,.40]){
+        const [cx,y,z]=strip.position,x=cx+strip.width*offset;
+        probe.near=.001;probe.far=.12;probe.set(metricPoint(x,y-.025,z),new THREE.Vector3(0,1,0));mountingRays++;
+        const fitting=probe.intersectObjects(bronze,false)[0],ceilingHit=probe.intersectObjects(ceilingShell,false)[0];
+        if(!fitting||!ceilingHit||Math.abs(ceilingHit.point.y-(y+.024)*space.worldScale[1])>.006)mountingGaps.push({name:strip.name,x,z,fitting:!!fitting,ceilingY:ceilingHit?.point.y,expected:(y+.024)*space.worldScale[1]});
+      }
+      canvas.dataset.fixtureMounting=JSON.stringify({rays:mountingRays,gaps:mountingGaps});
+      const plantedGaps=[];let plantedRays=0;
+      const soilShell=shell.filter(o=>o.material?.name==='Soil');
+      for(let i=1;i<gardenLayout.stairBedSections.length;i++){
+        const a=gardenLayout.stairBedSections[i-1],b=gardenLayout.stairBedSections[i];
+        for(const t of [.03,.33,.67,.97]){
+          const x=(a.soil[0][0]+a.soil[1][0])*.5*(1-t)+(b.soil[0][0]+b.soil[1][0])*.5*t,z=a.soil[0][1]*(1-t)+b.soil[0][1]*t,y=a.height*(1-t)+b.height*t+.225;
+          probe.near=.001;probe.far=.25;probe.set(metricPoint(x,y+.12,z),new THREE.Vector3(0,-1,0));plantedRays++;
+          const hit=probe.intersectObjects(soilShell,false)[0];if(!hit||Math.abs(hit.point.y-y*space.worldScale[1])>.008)plantedGaps.push({x,z,height:hit?.point.y,expected:y*space.worldScale[1]});
+        }
+      }
+      canvas.dataset.risingStairGarden=JSON.stringify({rays:plantedRays,gaps:plantedGaps});
+      const gardenRimGaps=[];let gardenRimRays=0;
+      const rimRuns=gardenLayout.stairBedSections.slice(1).map((b,i)=>({a:gardenLayout.stairBedSections[i],b}));
+      rimRuns.push({a:{edge:[gardenLayout.eastBed[0]],height:0},b:{edge:[gardenLayout.eastBed[1]],height:0},samples:[.003]});
+      for(const {a,b,samples} of rimRuns)for(const t of samples??[.12,.33,.67,.88])for(const rise of [.02,.10,.20]){
+        const x=a.edge[0][0]*(1-t)+b.edge[0][0]*t,z=a.edge[0][1]*(1-t)+b.edge[0][1]*t,y=a.height*(1-t)+b.height*t+rise;
+        probe.near=.001;probe.far=.36;probe.set(metricPoint(x-.18,y,z),new THREE.Vector3(1,0,0));gardenRimRays++;
+        const hit=probe.intersectObjects(shell,false)[0];
+        // A tread can meet the rim before its face at a miter. Either solid
+        // stone surface closes the joint; an empty or recessed face fails.
+        if(!hit||hit.object.material?.name!=='Warm_Pale_Limestone'||hit.distance>.115*space.worldScale[0]+.010)gardenRimGaps.push({x,z,y,material:hit?.object.material?.name,distance:hit?.distance});
+      }
+      canvas.dataset.connectedGardenRim=JSON.stringify({rays:gardenRimRays,gaps:gardenRimGaps});
+
+      // Inspect the upper curb locations, excluding the intentionally raised
+      // oak/bronze handrail. Stone/plaster must stop at the walking floor.
+      const floorShell=shell.filter(o=>['Warm_Pale_Limestone','Ivory_Mineral_Plaster','Pale_Marble_Planter'].includes(o.material?.name)),flushPoints=[];
+      const arrivalEdge=space.stairs.sections.at(-1).edge[0],join=[space.upperClosure[0]+.14,space.upperClosure[3]];
+      for(const t of [.15,.35,.55,.75])flushPoints.push([join[0]*(1-t)+arrivalEdge[0]*t,join[1]*(1-t)+arrivalEdge[1]*t]);
+      for(const x of [-4.2,-3,-2,-1,0,1,2])flushPoints.push([x,facadeZ(x)]);
+      const curbGaps=[];
+      for(const [x,z] of flushPoints){probe.near=.001;probe.far=.45;probe.set(metricPoint(x,space.upperFloor+.30,z),new THREE.Vector3(0,-1,0));const hit=probe.intersectObjects(floorShell,false)[0];if(!hit||Math.abs(hit.point.y-space.upperFloor*space.worldScale[1])>.012)curbGaps.push({x,z,height:hit?.point.y});}
+      canvas.dataset.upperFlushFloor=JSON.stringify({rays:flushPoints.length,gaps:curbGaps});
+      // Include timber in these rays: a coplanar oak crown used to pass the
+      // stone-only height check while remaining visible across this entrance.
+      const entryGaps=[];let entryRays=0;
+      const entryA=space.lowerCornerClosure[3],entryB=space.lowerCornerClosure[0];
+      for(const z of [.23,.50,.80,1.10])for(const offset of [-.04,-.015,0,.015,.04]){
+        const x=entryA[0]+(entryB[0]-entryA[0])*(z-entryA[1])/(entryB[1]-entryA[1])+offset;
+        probe.near=.001;probe.far=.45;probe.set(metricPoint(x,space.upperFloor+.30,z),new THREE.Vector3(0,-1,0));entryRays++;
+        const hit=probe.intersectObjects(shell,false)[0];
+        if(!hit||hit.object.material?.name!=='Warm_Pale_Limestone'||Math.abs(hit.point.y-space.upperFloor*space.worldScale[1])>.012)entryGaps.push({x,z,material:hit?.object.material?.name,height:hit?.point.y});
+      }
+      canvas.dataset.upperEntranceMarble=JSON.stringify({rays:entryRays,gaps:entryGaps});
+      const cheekGaps=[];let cheekRays=0;
+      for(let i=1;i<space.stairs.sections.length;i++){
+        const a=space.stairs.sections[i],b=space.stairs.sections[i-1],dx=b.edge[0][0]-a.edge[0][0],dz=b.edge[0][1]-a.edge[0][1],len=Math.hypot(dx,dz),nx=-dz/len,nz=dx/len;
+        for(const t of [.21,.51,.81])for(const fraction of [.12,.43,.74]){
+          const x=a.edge[0][0]*(1-t)+b.edge[0][0]*t-.065,z=a.edge[0][1]*(1-t)+b.edge[0][1]*t,y=(Math.min(space.upperFloor,a.height+.14)*(1-t)+Math.min(space.upperFloor,b.height+.14)*t)*fraction;
+          probe.near=.001;probe.far=.28;const from=metricPoint(x+nx*.16,y,z+nz*.16),to=metricPoint(x,y,z);probe.set(from,to.sub(from).normalize());cheekRays++;const hit=probe.intersectObjects(shell,false)[0];if(!hit||!['Warm_Oak','Oak_Shaded_Edges'].includes(hit.object.material?.name))cheekGaps.push({x,z,y,material:hit?.object.material?.name});
+        }
+      }
+      canvas.dataset.connectedStairFinish=JSON.stringify({rays:cheekRays,gaps:cheekGaps});
+      const lampGaps=[];
+      for(const [x,y,z] of decor.stairLamps){probe.near=.001;probe.far=.30;probe.set(metricPoint(x-.18,y,z),new THREE.Vector3(1,0,0));const hit=probe.intersectObjects(shell,false)[0];if(hit?.object.material?.name!=='Bronze')lampGaps.push({x,z,y,material:hit?.object.material?.name});}
+      canvas.dataset.visibleStairFixtures=JSON.stringify({rays:decor.stairLamps.length,gaps:lampGaps});
+      const ceilingGaps=[],ceilingPoints=[[0,-1.1,3.5],[1,-2.8,3.5],[0,-6.3,3.7726],[-4,-.85,3.5],[-4,-2.6,3.5],[-4,-3.36,3.5],[-2,.9,3.5],[-1,.5,3.5],[-3.9,1,3.5],[-3,-.8,space.upperCeiling],[-1,-2.3,space.upperCeiling],[1,-.8,space.upperCeiling]];
+      for(const [x,z,y] of ceilingPoints){probe.near=.001;probe.far=.30;probe.set(metricPoint(x,y-.15,z),new THREE.Vector3(0,1,0));const hit=probe.intersectObjects(shell,false)[0];if(hit?.object.material?.name!=='White_Satin_Ceiling'||Math.abs(hit.point.y-y*space.worldScale[1])>.008)ceilingGaps.push({x,z,y,material:hit?.object.material?.name,height:hit?.point.y});}
+      canvas.dataset.whiteCeilings=JSON.stringify({rays:ceilingPoints.length,gaps:ceilingGaps});
+      const columnGaps=[];let columnRays=0;
+      const west=space.westFacade,wallFace=west.wallCenterX+west.wallThickness/2;
+      for(const [columns,base] of [[facadeColumns.lower,0],[facadeColumns.upper,space.upperFloor]])for(const [index,{x,z}] of columns.entries()){const fromWest=base===0&&index===2;probe.near=.001;probe.far=.40;probe.set(metricPoint(x+(fromWest?-.30:.30),base+1.5,z),new THREE.Vector3(fromWest?1:-1,0,0));columnRays++;const hit=probe.intersectObjects(shell,false)[0];if(hit?.object.material?.name!=='Ivory_Polished_Column')columnGaps.push({x,z,material:hit?.object.material?.name});}
+      canvas.dataset.modernColumns=JSON.stringify({rays:columnRays,gaps:columnGaps});
+      const approachGaps=[];
+      for(const x of [1.96,2.08,2.20]){probe.near=.001;probe.far=1.5;probe.set(metricPoint(x,1,8.7),new THREE.Vector3(0,-1,0));const hit=probe.intersectObjects(shell,false)[0];if(!hit||Math.abs(hit.point.y)>.012)approachGaps.push({x,height:hit?.point.y,material:hit?.object.material?.name});}
+      canvas.dataset.openStairApproach=JSON.stringify({rays:3,gaps:approachGaps});
+
+
+
+    }
+    const setHover=id=>{if(id!==hoverLast){hoverLast=id;callbacks.onHover(id);}};
+    const clearPointer=()=>{lastPointer=null;setHover('');};
+    const pickPoint=new THREE.Vector2(),hits=[];
+    function pick(clientX,clientY,activate=false){
+      const rect=canvas.getBoundingClientRect();pickPoint.set((clientX-rect.left)/rect.width*2-1,-(clientY-rect.top)/rect.height*2+1);raycaster.setFromCamera(pickPoint,camera);
+      hits.length=0;raycaster.intersectObjects(visibleTargets(targets),false,hits);
+      const hit=hits.find(hit=>hit.distance>.07);const id=hit?.object.userData.contentId;
+      if(!id)return '';
+      return (activate?interaction.begin(id):interaction.canActivate(id))?id:'';
+    }
+    const controller=new WalkController(canvas,camera,{start:OUTDOOR,onClick:(x,y)=>pick(x,y,true),onArea:callbacks.onArea,onRoute:callbacks.onRoute,onArrive:target=>{const id=target==='gallery'?'profile':target==='library'?'contact':target==='atelier'?content.projects[0]?.id:null;if(id)interaction.begin(id);},onSeated:callbacks.onSeated,onCrouch:callbacks.onCrouch});resources.controller=controller;controller.setPaused(true);
+    canvas.addEventListener('pointermove',e=>{if(e.pointerType==='touch'){clearPointer();return;}lastPointer??={x:0,y:0};lastPointer.x=e.clientX;lastPointer.y=e.clientY;},{signal});
+    canvas.addEventListener('pointerdown',()=>setHover(''),{signal});
+    canvas.addEventListener('pointerleave',clearPointer,{signal});
+    canvas.addEventListener('pointercancel',clearPointer,{signal});
+    window.addEventListener('blur',clearPointer,{signal});
+    const resize=()=>{const w=canvas.clientWidth,h=canvas.clientHeight;if(!w||!h)return;const scale=renderScale(w,h,window.devicePixelRatio);renderer.setPixelRatio(scale);renderer.setSize(w,h,false);composer.setPixelRatio(scale);composer.setSize(w,h);const bloomScale=Math.min(.5,768/Math.max(w*scale,h*scale))*quality;bloom.setSize(w*scale*bloomScale,h*scale*bloomScale);camera.userData.presentationViewport={width:w,height:h};camera.aspect=w/h;camera.fov=w/h<.8?72:57;camera.updateProjectionMatrix();if(renderReady&&!disposed&&!document.hidden)composer.render();};
+    const observer=new ResizeObserver(resize);resources.observer=observer;observer.observe(canvas);resize();
+    renderer.shadowMap.autoUpdate=false;renderer.shadowMap.needsUpdate=true;
+    // Parallel shader polling retains its materials until completion, including
+    // an aborted load, so a retry never disposes an in-flight shader program.
+    updateLocalLights(0);scene.updateMatrixWorld(true);
+    // These meshes never animate. Keep their world matrices cached for both
+    // main and reflected views; desk props/camera/cues remain fully animated.
+    const freeze=root=>root.traverse(o=>{o.matrixAutoUpdate=false;o.matrixWorldAutoUpdate=false;});
+    freeze(architecture.scene);freeze(garden);
+    staticPlants.forEach(freeze);
+    callbacks.onProgress({stage:'compile',phase:'그래픽을 준비하고 있어요'});
+    const reducedMotion=matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const interaction=createContentInteraction({camera,controller,entries:contentEntries,targets,callbacks,signal,reducedMotion});let lastNearby=0;
+    function applyAfternoonLight(){
+      sun.position.set(sun.target.position.x+daylight.sunX,sun.target.position.y+daylight.sunY,sun.target.position.z+daylight.sunZ);
+      sun.color.setRGB(...daylight.sunColor);sun.intensity=daylight.sun;
+      hemisphere.intensity=daylight.hemisphere;hemisphere.color.set(0xbfcbd9);
+      scene.environmentIntensity=daylight.environment;renderer.toneMappingExposure=daylight.exposure;
+      daylightFill.value=daylight.bake;for(const [material,base] of bakedMaterials)material.lightMapIntensity=base*daylight.bake;
+      passageDaylight.intensity=lighting.passage*daylight.sun/2.15;
+      courtyardFill.color.set(0xd7e0e9);courtyardFill.intensity=.75*daylight.bake;bounce.intensity=.25*daylight.bake;
+      leafyDaylight.intensity=45*daylight.sun/2.15;filteredFloorDaylight.intensity=65*daylight.sun/2.15;
+      floweringCornices.userData.canopyFill.value=.20+.80*daylight.bake;
+      dayFog.setRGB(...daylight.horizon).multiplyScalar(.72);
+      skyDirection.copy(sun.position).sub(sun.target.position).normalize();water.material.uniforms.sunDirection.value.copy(skyDirection);
+      skyDirection.y*=.42;skyDirection.normalize();sunsetSky.setTimeOfDay(daylight,skyDirection);
+      water.material.uniforms.sunColor.value.copy(sun.color).multiplyScalar(daylight.sun/2.15);
+      canvas.dataset.simulatedHour=daylight.hour.toFixed(2);canvas.dataset.lightingMode='overcast';
+    }
+    applyAfternoonLight();
+    scene.updateMatrixWorld(true);
+    let wayfinding,lastGuidanceKey='';
+    function refreshWayfinding(){
+      const target=nextWayfindingTarget(viewed,content.projects),start={...controller.position},key=`${target}:${start.x}:${start.y??0}:${start.z}`;
+      if(key!==lastGuidanceKey){
+        lastGuidanceKey=key;
+        const destination=target==='gallery'?GALLERY:target==='atelier'?WORK_GUIDANCE:LIBRARY;
+        let route=target?guideRoute(start,destination):[];
+        if(target&&!route.length){Object.assign(start,OUTDOOR,{y:0});route=guideRoute(start,destination);}
+        wayfinding.setPath(route.length?[[start,...route]]:[],target);
+      }
+      wayfinding.group.visible=wayfindingEnabled&&!endingActive&&!interaction.id&&wayfinding.count>0;
+      canvas.dataset.wayfinding=JSON.stringify({enabled:wayfindingEnabled,target,markers:wayfinding.count,paths:wayfinding.count?1:0});
+    }
+    const compileStart=performance.now();compiling=true;
+    try{
+      const routeStart=performance.now(),routes=await prepareNavigationRoutes(()=>yieldScenePreparation(signal));
+      canvas.dataset.navigationPreparation=JSON.stringify({routes,ms:Math.round(performance.now()-routeStart)});
+      const floors=[...closureMeshes];architecture.scene.traverse(mesh=>{if(mesh.isMesh)floors.push(mesh);});
+      wayfinding=createWayfinding([],floors);scene.add(wayfinding.group);refreshWayfinding();
+      canvas.dataset.gpuPreparation=JSON.stringify(await prepareSceneGpu({renderer,scene,camera,target:composer.renderTarget1,signal}));
+    }
+    finally{compiling=false;if(disposed)release();}
+    compileMs=performance.now()-compileStart;
+    if(disposed)return null;
+    function render(){
+      if(disposed)return;raf=requestAnimationFrame(render);clock.update();const rawDelta=clock.getDelta(),delta=Math.min(rawDelta,.25),time=clock.getElapsed();
+      if(!document.hidden)sunsetSky.update(delta,reducedMotion);
+      if(document.hidden||(controller.paused&&(interaction.phase==='idle'||interaction.phase==='reading'))){movementAudio.update(controller.position,controller.motion,delta,false);setHover('');return;}
+      let remaining=delta;while(remaining>0){const step=Math.min(remaining,.035);controller.step(step);remaining-=step;}interaction.step(delta);if(time-lastNearby>.15){lastNearby=time;interaction.updateNearby();}water.material.uniforms.time.value+=reducedMotion?0:delta*.30;seaView.update(delta,reducedMotion);
+      const motion=controller.motion,submersion=motion.inPool?Math.max(0,space.poolMotion.waterLevel*space.worldScale[1]-motion.eyeY):0;
+      movementAudio.update(controller.position,motion,delta,!controller.paused);
+      if(motion.inPool!==wasInWater){wasInWater=motion.inPool;callbacks.onWater?.(wasInWater);}
+      if(motion.underwater!==wasUnderwater){wasUnderwater=motion.underwater;callbacks.onUnderwater?.(wasUnderwater);}
+      output.uniforms.depth.value=submersion;output.uniforms.time.value=time;
+      if(submersion>.02)scene.fog.color.set(0x2f7686);else scene.fog.color.copy(dayFog);scene.fog.density=submersion>.02?.035+Math.min(submersion,.8)*.065:.006;
+      updateLocalLights(time,delta);
+      const cueAlpha=cueOpacity(performance.now()/1000,reducedMotion);
+      for(const [id,instances] of cues)for(const cue of instances)applyCuePulse(cue,cueAlpha,!viewed.has(id)&&(!cue.exhibit||cue.exhibit.visible)&&!interaction.id);
+      wayfinding.update(performance.now()/1000,wayfindingEnabled&&!endingActive&&!interaction.id,reducedMotion);
+      if(controller.pointer||controller.paused)setHover('');
+      else if(lastPointer&&time-lastPick>.15){lastPick=time;setHover(pick(lastPointer.x,lastPointer.y));}
+      renderer.info.autoReset=false;renderer.info.reset();const renderStart=performance.now();meter.begin();composer.render();const stats=meter.end(rawDelta,quality,{position:controller.position,area:controller.area,presentation:interaction.phase,seated:controller.seated});
+      if(stats&&time-lastQualityChange>8&&stats.focused&&!stats.hidden&&stats.samples>30){
+        const next=stats.gpuP95>24?.7:stats.gpuP95<16?1:quality;
+        if(next!==quality){quality=next;lastQualityChange=time;meter.resetSamples();resize();}
+      }
+      if(import.meta.env.DEV&&time-lastDiagnostic>.25){lastDiagnostic=time;canvas.dataset.presentation=JSON.stringify({phase:interaction.phase,id:interaction.id,bookAngle:deskObjects[1].root.getObjectByName('Contact_Note_Cover_Pivot')?.rotation.x??0,cardPosition:deskObjects[1].root.position.toArray(),camera:camera.position.toArray()});canvas.dataset.exhibition=JSON.stringify(exhibits.filter(item=>item.root.visible).map(item=>({id:item.root.children.find(child=>child.userData.contentId)?.userData.contentId,position:item.root.position.toArray()})));canvas.dataset.position=JSON.stringify(controller.position);canvas.dataset.motion=JSON.stringify(motion);canvas.dataset.area=controller.area;canvas.dataset.route=String(controller.path.length);canvas.dataset.skyMotion=JSON.stringify(sunsetSky.state);canvas.dataset.visibleCues=JSON.stringify([...cues].filter(([,instances])=>instances.some(cue=>cue.group.visible)).map(([id])=>id));canvas.dataset.cueInstances=JSON.stringify(Object.fromEntries([...cues].map(([id,instances])=>[id,instances.filter(cue=>cue.group.visible).length])));canvas.dataset.frameMs=String(Math.round(rawDelta*1000));canvas.dataset.renderMs=String(Math.round(performance.now()-renderStart));canvas.dataset.triangles=String(renderer.info.render.triangles);}
+    }
+    composer.render();meter.ready({readyMs:performance.now()-started,assetMs,compileMs});renderReady=true;raf=requestAnimationFrame(render);
+    return {setWayfinding:value=>{wayfindingEnabled=value;refreshWayfinding();},setEnding:value=>{endingActive=value;interaction.setEnabled(!value);if(value){controller.cancelRoute();setHover('');}},pause:value=>{if(value||interaction.phase==='idle')controller.setPaused(value);},interact:id=>interaction.begin(id),stand:()=>controller.stand(),closeContent:()=>interaction.close(),observeContent:reader=>interaction.observe(reader),galleryPage:offset=>setGalleryPage(galleryPage+offset),setViewed:value=>{viewed=value;refreshWayfinding();},reset:()=>{movementAudio.reset();interaction.reset();controller.reset();setGalleryPage(0);refreshWayfinding();},guide:target=>{if(interaction.phase==='idle'){if(target==='atelier')setGalleryPage(0);controller.guide(target);}},cancelGuide:()=>controller.cancelRoute(),touch:(x,z)=>{if(controller.paused)return;controller.cancelRoute();if((x||z)&&controller.seated)controller.stand();controller.touchMove={x,z};},touchAction:(action,active)=>controller.touchAction(action,active),dispose};
+  } catch(error){dispose();throw error;}
+}
